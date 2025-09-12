@@ -14,6 +14,10 @@ teleop_server:
   # teleoperation mode
   teleop_mode: 'left_arm_6DOF'
   relative_translation_scale: 0.8  # for dexterous teleoperation
+  bimanual_teleop: &bimanual_teleop False
+
+robot_server:
+  bimanual_teleop: *bimanual_teleop
 
 publisher:
   # two realsense cameras
@@ -70,3 +74,6 @@ publisher:
       marker_vis_rotation_angle: 0
       cpu_core_id:
         - 14
+  # robot publisher
+  robot_publisher:      
+    bimanual_teleop: *bimanual_teleop

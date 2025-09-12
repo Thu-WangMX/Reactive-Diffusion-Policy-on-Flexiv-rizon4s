@@ -2,6 +2,7 @@ import numpy as np
 from typing import Tuple, Union
 import transforms3d as t3d
 from geometry_msgs.msg import Pose
+import scipy.spatial.transform as st
 
 def ros_pose_to_4x4matrix(pose: Pose) -> np.ndarray:
     # Convert ROS Pose message to 4x4 transformation matrix

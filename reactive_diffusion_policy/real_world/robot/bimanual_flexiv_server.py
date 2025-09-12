@@ -19,21 +19,27 @@ class BimanualFlexivServer():
                  port: int = 8092,
                  left_robot_ip="192.168.2.110",
                  right_robot_ip="192.168.2.111",
-                 use_planner: bool = False
+                 use_planner: bool = False,
+                 bimanual_teleop: bool = True
                  ) -> None:
+        
         self.host_ip = host_ip
         self.port = port
-        self.left_robot = FlexivController(local_ip=host_ip,
-                                           robot_ip=left_robot_ip, )
-        self.right_robot = FlexivController(local_ip=host_ip,
-                                            robot_ip=right_robot_ip, )
 
+        self.bimanual_teleop = bimanual_teleop
+
+        self.left_robot = FlexivController(local_ip=host_ip, robot_ip=left_robot_ip)
         self.left_robot.robot.setMode(self.left_robot.mode.NRT_CARTESIAN_MOTION_FORCE)
-        self.right_robot.robot.setMode(self.right_robot.mode.NRT_CARTESIAN_MOTION_FORCE)
+        if self.bimanual_teleop:
+            self.right_robot = FlexivController(local_ip=host_ip, robot_ip=right_robot_ip)
+            self.right_robot.robot.setMode(self.right_robot.mode.NRT_CARTESIAN_MOTION_FORCE)
+        else:
+            self.right_robot = None
 
         # open the gripper
         self.left_robot.gripper.move(0.1, 10, 0)
-        self.right_robot.gripper.move(0.1, 10, 0)
+        if self.bimanual_teleop:    
+            self.right_robot.gripper.move(0.1, 10, 0)
 
         if use_planner:
             # TODO: support bimanual planner
@@ -54,12 +60,14 @@ class BimanualFlexivServer():
                 thread_left.start()
             else:
                 thread_left = None
-            if self.right_robot.robot.isFault():
-                logger.warning("Fault occurred on right robot server, trying to clear ...")
-                thread_right = threading.Thread(target=self.right_robot.clear_fault)
-                thread_right.start()
-            else:
-                thread_right = None
+
+            if self.bimanual_teleop:    
+                if self.right_robot.robot.isFault():
+                    logger.warning("Fault occurred on right robot server, trying to clear ...")
+                    thread_right = threading.Thread(target=self.right_robot.clear_fault)
+                    thread_right.start()
+                else:
+                    thread_right = None
             # Wait for both threads to finish
             fault_msgs = []
             if thread_left is not None:
@@ -73,24 +81,28 @@ class BimanualFlexivServer():
         @self.app.get('/get_current_robot_states')
         async def get_current_robot_states() -> BimanualRobotStates:
             left_robot_state = self.left_robot.get_current_robot_states()
-            right_robot_state = self.right_robot.get_current_robot_states()
             left_robot_gripper_state = self.left_robot.get_current_gripper_states()
-            right_robot_gripper_state = self.right_robot.get_current_gripper_states()
+            if self.bimanual_teleop:
+                right_robot_state = self.right_robot.get_current_robot_states()
+                right_robot_gripper_state = self.right_robot.get_current_gripper_states()
+
             return BimanualRobotStates(leftRobotTCP=left_robot_state.tcpPose,
-                                       rightRobotTCP=right_robot_state.tcpPose,
+                                       rightRobotTCP=right_robot_state.tcpPose if self.bimanual_teleop else [0.0]*7,
                                        leftRobotTCPVel=left_robot_state.tcpVel,
-                                       rightRobotTCPVel=right_robot_state.tcpVel,
+                                       rightRobotTCPVel=right_robot_state.tcpVel if self.bimanual_teleop else [0.0]*6,
                                        leftRobotTCPWrench=left_robot_state.extWrenchInTcp,
-                                       rightRobotTCPWrench=right_robot_state.extWrenchInTcp,
-                                       leftGripperState=[left_robot_gripper_state.width,
-                                                            left_robot_gripper_state.force],
-                                       rightGripperState=[right_robot_gripper_state.width,
-                                                                 right_robot_gripper_state.force])
+                                       rightRobotTCPWrench=right_robot_state.extWrenchInTcp if self.bimanual_teleop else [0.0]*6,
+                                       leftGripperState=[left_robot_gripper_state.width, 
+                                                         left_robot_gripper_state.force],
+                                       rightGripperState=[right_robot_gripper_state.width, 
+                                                          right_robot_gripper_state.force] if self.bimanual_teleop else [0.0]*2)
 
         @self.app.post('/move_gripper/{robot_side}')
         async def move_gripper(robot_side: str, request: MoveGripperRequest) -> Dict[str, str]:
             if robot_side not in ['left', 'right']:
                 raise HTTPException(status_code=400, detail="Invalid robot side. Use 'left' or 'right'.")
+            if not self.bimanual_teleop and robot_side == 'right':
+                raise HTTPException(status_code=400, detail="Right robot not available in single-arm mode.")
 
             robot_gripper = self.left_robot.gripper if robot_side == 'left' else self.right_robot.gripper
             robot_gripper.move(request.width, request.velocity, request.force_limit)
@@ -102,6 +114,8 @@ class BimanualFlexivServer():
         async def move_gripper_force(robot_side: str, request: MoveGripperRequest) -> Dict[str, str]:
             if robot_side not in ['left', 'right']:
                 raise HTTPException(status_code=400, detail="Invalid robot side. Use 'left' or 'right'.")
+            if not self.bimanual_teleop and robot_side == 'right':
+                raise HTTPException(status_code=400, detail="Right robot not available in single-arm mode.")
 
             robot_gripper = self.left_robot.gripper if robot_side == 'left' else self.right_robot.gripper
             # use force control mode to grasp
@@ -113,8 +127,10 @@ class BimanualFlexivServer():
         async def stop_gripper(robot_side: str) -> Dict[str, str]:
             if robot_side not in ['left', 'right']:
                 raise HTTPException(status_code=400, detail="Invalid robot side. Use 'left' or 'right'.")
+            if not self.bimanual_teleop and robot_side == 'right':
+                raise HTTPException(status_code=400, detail="Right robot not available in single-arm mode.")
 
-            robot_gripper = self.left_robot.gripper if robot_side == 'left' else self.right_robot.gripper
+            robot_gripper = self.left_robot.gripper if robot_side == 'left' else self.right_robot.gripper   
 
             robot_gripper.stop()
             return {"message": f"{robot_side.capitalize()} gripper stopping"}
@@ -123,6 +139,8 @@ class BimanualFlexivServer():
         async def move_tcp(robot_side: str, request: TargetTCPRequest) -> Dict[str, str]:
             if robot_side not in ['left', 'right']:
                 raise HTTPException(status_code=400, detail="Invalid robot side. Use 'left' or 'right'.")
+            if not self.bimanual_teleop and robot_side == 'right':
+                raise HTTPException(status_code=400, detail="Right robot not available in single-arm mode.")
 
             robot = self.left_robot if robot_side == 'left' else self.right_robot
 
@@ -134,6 +152,8 @@ class BimanualFlexivServer():
         async def execute_primitive(robot_side: str, request: ActionPrimitiveRequest) -> Dict[str, str]:
             if robot_side not in ['left', 'right']:
                 raise HTTPException(status_code=400, detail="Invalid robot side. Use 'left' or 'right'.")
+            if not self.bimanual_teleop and robot_side == 'right':
+                raise HTTPException(status_code=400, detail="Right robot not available in single-arm mode.")
 
             robot = self.left_robot if robot_side == 'left' else self.right_robot
 
@@ -144,6 +164,8 @@ class BimanualFlexivServer():
         async def get_current_tcp(robot_side: str) -> List[float]:
             if robot_side not in ['left', 'right']:
                 raise HTTPException(status_code=400, detail="Invalid robot side. Use 'left' or 'right'.")
+            if not self.bimanual_teleop and robot_side == 'right':
+                raise HTTPException(status_code=400, detail="Right robot not available in single-arm mode.")
 
             robot = self.left_robot if robot_side == 'left' else self.right_robot
 
@@ -153,20 +175,27 @@ class BimanualFlexivServer():
         async def birobot_go_home() -> Dict[str, str]:
             if self.planner is None:
                 return {"message": "Planner is not available"}
+            
             self.left_robot.robot.setMode(self.left_robot.mode.NRT_JOINT_POSITION)
-            self.right_robot.robot.setMode(self.right_robot.mode.NRT_JOINT_POSITION)
+            if self.bimanual_teleop:
+                self.right_robot.robot.setMode(self.right_robot.mode.NRT_JOINT_POSITION)
 
-            current_q = self.left_robot.get_current_q() + self.right_robot.get_current_q()
+            if self.bimanual_teleop:
+                current_q = self.left_robot.get_current_q() + self.right_robot.get_current_q()
+            else:
+                current_q = self.left_robot.get_current_q()
             waypoints = self.planner.getGoHomeTraj(current_q)
 
             for js in waypoints:
                 print(js)
                 self.left_robot.move(js[:7])
-                self.right_robot.move(js[7:])
+                if self.bimanual_teleop:
+                    self.right_robot.move(js[7:])
                 time.sleep(0.01)
 
             self.left_robot.robot.setMode(self.left_robot.mode.NRT_CARTESIAN_MOTION_FORCE)
-            self.right_robot.robot.setMode(self.right_robot.mode.NRT_CARTESIAN_MOTION_FORCE)
+            if self.bimanual_teleop:
+                self.right_robot.robot.setMode(self.right_robot.mode.NRT_CARTESIAN_MOTION_FORCE)
             return {"message": "Bimanual robots have gone home"}
 
     def run(self):

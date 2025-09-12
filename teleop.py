@@ -9,6 +9,7 @@ from reactive_diffusion_policy.real_world.real_world_transforms import RealWorld
 from reactive_diffusion_policy.real_world.teleoperation.teleop_server import TeleopServer
 from reactive_diffusion_policy.real_world.publisher.bimanual_robot_publisher import BimanualRobotPublisher
 from reactive_diffusion_policy.real_world.robot.bimanual_flexiv_server import BimanualFlexivServer
+from reactive_diffusion_policy.real_world.robot.franka_server import FrankaServer
 import hydra
 from omegaconf import DictConfig
 from loguru import logger
@@ -48,7 +49,13 @@ def create_robot_publisher_node(cfg: DictConfig, transforms: RealWorldTransforms
 )
 def main(cfg: DictConfig):
     # create robot server
-    robot_server = BimanualFlexivServer(**cfg.task.robot_server)
+    robot_name = cfg.task.robot_server.get("robot_name", "flexiv-rizon")
+    if robot_name == "flexiv-rizon":
+        robot_server = BimanualFlexivServer(**cfg.task.robot_server)
+    elif robot_name == "franka":
+        robot_server = FrankaServer(**cfg.task.robot_server)
+    else:
+        raise ValueError(f"Unknown robot name: {robot_name}")
     robot_server_thread = threading.Thread(target=robot_server.run, daemon=True)
     # start the robot server
     robot_server_thread.start()
@@ -56,14 +63,16 @@ def main(cfg: DictConfig):
     time.sleep(1)
 
     # create teleop server
-    transforms = RealWorldTransforms(option=cfg.task.transforms)
+    transforms = RealWorldTransforms(option=cfg.task.transforms)    
     teleop_server = TeleopServer(robot_server_ip=cfg.task.robot_server.host_ip,
                                  robot_server_port=cfg.task.robot_server.port,
                                  transforms=transforms,
                                  **cfg.task.teleop_server)
     teleop_process = multiprocessing.Process(target=teleop_server.run)
+    logger.debug("Teleop server Intialized!")
 
     publisher_process = multiprocessing.Process(target=create_robot_publisher_node, args=(cfg, transforms))
+    logger.debug("Bimanual publisher Intialized!")
     try:
         publisher_process.start()
         teleop_process.start()
