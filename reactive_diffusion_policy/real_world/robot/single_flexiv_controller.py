@@ -15,7 +15,7 @@ from loguru import logger
 
 class FlexivController():
     def __init__(self,
-                 local_ip="192.168.2.187",
+                 local_ip="192.168.2.101",
                  robot_ip="192.168.2.100",
                  ) -> None:
         self.DOF=7
@@ -25,7 +25,9 @@ class FlexivController():
             self.gripper_states = flexivrdk.GripperStates()
             self.log = flexivrdk.Log()
             self.mode = flexivrdk.Mode
+            print(1111111122)
             self.robot = flexivrdk.Robot(robot_ip, local_ip)
+            print(222222)
             self.gripper = flexivrdk.Gripper(self.robot)
 
             self.clear_fault()

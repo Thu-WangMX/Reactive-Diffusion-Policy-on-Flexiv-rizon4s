@@ -1,12 +1,14 @@
 robot_name: 'flexiv_rizon'
 robot_server:
-  host_ip: "192.168.2.187"
+  host_ip: "192.168.2.101"
   port: 8092
-  left_robot_ip: "192.168.2.110"
+  left_robot_ip: "192.168.2.100" 
+  robot_sn: "Rizon4s-062958"
+  gripper_name: "Flexiv-GN01"
   right_robot_ip: "192.168.2.111"
-  bimanual_teleop: &bimanual_teleop True
+  bimanual_teleop: &bimanual_teleop False
 publisher:
-  vr_server_ip: &vr_server_ip '192.168.2.205'
+  vr_server_ip: &vr_server_ip '192.168.2.219'
   # vr_server_ip: &vr_server_ip '192.168.2.203'
   vr_server_port: 10002
   robot_publisher:
@@ -18,7 +20,7 @@ publisher:
     vr_server_force_port: 10005
     bimanual_teleop: *bimanual_teleop
 teleop_server:
-  host_ip: "192.168.2.187"
+  host_ip: "192.168.2.101"
   port: 8082
   fps: 60
   use_force_control_for_gripper: False

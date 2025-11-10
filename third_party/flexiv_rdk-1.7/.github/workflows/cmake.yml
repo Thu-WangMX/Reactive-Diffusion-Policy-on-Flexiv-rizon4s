@@ -1,0 +1,37 @@
+name: CMake
+
+on:
+  push:
+    branches: [main, v0.x]
+  pull_request:
+    branches: [main, v0.x]
+  workflow_dispatch:
+
+env:
+  # Customize the CMake build type here (Release, Debug, RelWithDebInfo, etc.)
+  BUILD_TYPE: Release
+
+jobs:
+  build-ubuntu-22:
+    # GitHub-hosted Ubuntu 22.04 runner
+    runs-on: ubuntu-22.04
+    # Use shared steps
+    steps:
+      - uses: actions/checkout@v3
+      - uses: ./.github/workflows/shared_steps
+
+  build-macos-14:
+    # GitHub-hosted macOS 14 runner with M1 chip
+    runs-on: macos-14
+    # Use shared steps
+    steps:
+      - uses: actions/checkout@v3
+      - uses: ./.github/workflows/shared_steps
+
+  build-windows-2022:
+    # GitHub-hosted Windows 2022 runner
+    runs-on: windows-2022
+    # Use shared steps
+    steps:
+      - uses: actions/checkout@v3
+      - uses: ./.github/workflows/shared_steps

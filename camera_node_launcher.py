@@ -28,6 +28,7 @@ os.environ["MKL_NUM_THREADS"] = "12"
 os.environ["NUMEXPR_NUM_THREADS"] = "12"
 os.environ["OMP_NUM_THREADS"] = "12"
 
+
 import cv2
 # add this to prevent assigning too may threads when using open-cv
 cv2.setNumThreads(12)
@@ -39,10 +40,17 @@ class SchedParam(ctypes.Structure):
     _fields_ = [("sched_priority", ctypes.c_int)]
 param = SchedParam()
 param.sched_priority = 99  # highest priority
-
+print(11111111111)
 pid = os.getpid()
-if libc.sched_setscheduler(pid, SCHED_RR, ctypes.byref(param)) != 0:
-    raise OSError("Failed to set scheduler")
+
+# print(libc.sched_setscheduler(pid, SCHED_RR, ctypes.byref(param)))
+# if libc.sched_setscheduler(pid, SCHED_RR, ctypes.byref(param)) != 0:
+#     raise OSError("Failed to set scheduler")
+
+SCHED_OTHER = 0  # 默认调度策略
+if libc.sched_setscheduler(pid, SCHED_OTHER, ctypes.byref(param)) != 0:
+    print(f"Failed to set scheduler. errno: {ctypes.get_errno()}")
+
 
 class CameraWorker:
     def __init__(self, camera_config):
@@ -146,4 +154,5 @@ def main(cfg: DictConfig):
         logger.info("All Camera publishers shutdown")
 
 if __name__ == "__main__":
+    print(22222222)
     main()

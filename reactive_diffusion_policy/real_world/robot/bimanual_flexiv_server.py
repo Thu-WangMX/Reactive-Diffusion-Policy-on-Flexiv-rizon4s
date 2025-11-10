@@ -5,7 +5,8 @@ import uvicorn
 from fastapi import FastAPI, HTTPException
 from loguru import logger
 
-from reactive_diffusion_policy.real_world.robot.single_flexiv_controller import FlexivController
+# from reactive_diffusion_policy.real_world.robot.single_flexiv_controller import FlexivController
+from reactive_diffusion_policy.real_world.robot.flexiv_controller import FlexivController
 from reactive_diffusion_policy.common.data_models import (BimanualRobotStates, MoveGripperRequest,
                                                           TargetTCPRequest, ActionPrimitiveRequest)
 
@@ -15,31 +16,35 @@ class BimanualFlexivServer():
     """
     # TODO: use UDP to respond
     def __init__(self,
-                 host_ip="192.168.2.187",
+                 robot_sn,
+                 gripper_name,
+                 host_ip="192.168.2.169",
                  port: int = 8092,
                  left_robot_ip="192.168.2.110",
                  right_robot_ip="192.168.2.111",
                  use_planner: bool = False,
-                 bimanual_teleop: bool = True
+                 bimanual_teleop: bool = False
                  ) -> None:
         
         self.host_ip = host_ip
         self.port = port
-
         self.bimanual_teleop = bimanual_teleop
 
-        self.left_robot = FlexivController(local_ip=host_ip, robot_ip=left_robot_ip)
-        self.left_robot.robot.setMode(self.left_robot.mode.NRT_CARTESIAN_MOTION_FORCE)
+        self.left_robot = FlexivController(robot_sn, gripper_name,remote_control = True)
+        #self.left_robot.ZeroFTSensor()
+        #self.left_robot.robot.SwitchMode(self.left_robot.mode.NRT_CARTESIAN_MOTION_FORCE)
         if self.bimanual_teleop:
-            self.right_robot = FlexivController(local_ip=host_ip, robot_ip=right_robot_ip)
+            self.right_robot = FlexivController(robot_sn, gripper_name,remote_control = True)
             self.right_robot.robot.setMode(self.right_robot.mode.NRT_CARTESIAN_MOTION_FORCE)
         else:
             self.right_robot = None
 
         # open the gripper
-        self.left_robot.gripper.move(0.1, 10, 0)
+        print(555555555555556)
+        self.left_robot.gripper.Move(0.1, 0.1, 10)
+        print(555555555555555)
         if self.bimanual_teleop:    
-            self.right_robot.gripper.move(0.1, 10, 0)
+            self.right_robot.gripper.Move(0.1, 0.1, 10)
 
         if use_planner:
             # TODO: support bimanual planner
@@ -77,26 +82,87 @@ class BimanualFlexivServer():
                 thread_right.join()
                 fault_msgs.append("Right robot fault cleared")
             return fault_msgs
-
+  
         @self.app.get('/get_current_robot_states')
         async def get_current_robot_states() -> BimanualRobotStates:
+            
             left_robot_state = self.left_robot.get_current_robot_states()
             left_robot_gripper_state = self.left_robot.get_current_gripper_states()
+            left_robot_gripper_force = self.left_robot.get_current_gripper_force()
+            left_robot_gripper_width = self.left_robot.get_current_gripper_width()
             if self.bimanual_teleop:
                 right_robot_state = self.right_robot.get_current_robot_states()
                 right_robot_gripper_state = self.right_robot.get_current_gripper_states()
 
-            return BimanualRobotStates(leftRobotTCP=left_robot_state.tcpPose,
-                                       rightRobotTCP=right_robot_state.tcpPose if self.bimanual_teleop else [0.0]*7,
-                                       leftRobotTCPVel=left_robot_state.tcpVel,
-                                       rightRobotTCPVel=right_robot_state.tcpVel if self.bimanual_teleop else [0.0]*6,
-                                       leftRobotTCPWrench=left_robot_state.extWrenchInTcp,
-                                       rightRobotTCPWrench=right_robot_state.extWrenchInTcp if self.bimanual_teleop else [0.0]*6,
-                                       leftGripperState=[left_robot_gripper_state.width, 
-                                                         left_robot_gripper_state.force],
+            return BimanualRobotStates(leftRobotTCP=left_robot_state.tcp_pose,
+                                       rightRobotTCP=right_robot_state.tcp_pose if self.bimanual_teleop else [0.0]*7,
+                                       leftRobotTCPVel=left_robot_state.tcp_vel,
+                                       rightRobotTCPVel=right_robot_state.tcp_vel if self.bimanual_teleop else [0.0]*6,
+                                       leftRobotTCPWrench=left_robot_state.ext_wrench_in_tcp,
+                                       rightRobotTCPWrench=right_robot_state.ext_wrench_in_tcp if self.bimanual_teleop else [0.0]*6,
+                                       leftGripperState=[left_robot_gripper_width, 
+                                                         left_robot_gripper_force],
                                        rightGripperState=[right_robot_gripper_state.width, 
                                                           right_robot_gripper_state.force] if self.bimanual_teleop else [0.0]*2)
 
+
+        # @self.app.get('/get_current_robot_states')
+        # async def get_current_robot_states() -> BimanualRobotStates:
+        #     # 1. 取左右手臂状态
+        #     left_robot_state = self.left_robot.get_current_robot_states()
+        #     left_robot_gripper_state = self.left_robot.get_current_gripper_states()
+        #     print(1010101011099999)
+        #     right_robot_state = None
+        #     right_robot_gripper_state = None
+        #     if self.bimanual_teleop:
+        #         right_robot_state = self.right_robot.get_current_robot_states()
+        #         right_robot_gripper_state = self.right_robot.get_current_gripper_states()
+
+        #     try:
+        #         print(10101010110)
+        #         # 2. 显式转成 Python list，确保 Pydantic / JSON 不会因为 pybind11 容器报错
+        #         return BimanualRobotStates(
+        #             # TCP pose: (x, y, z, qw, qx, qy, qz)
+        #             leftRobotTCP=list(left_robot_state.tcp_pose),
+        #             rightRobotTCP=(
+        #                 list(right_robot_state.tcp_pose)
+        #                 if self.bimanual_teleop else [0.0] * 7
+        #             ),
+
+        #             # TCP velocity: (vx, vy, vz, wx, wy, wz)
+        #             leftRobotTCPVel=list(left_robot_state.tcp_vel),
+        #             rightRobotTCPVel=(
+        #                 list(right_robot_state.tcp_vel)
+        #                 if self.bimanual_teleop else [0.0] * 6
+        #             ),
+
+        #             # TCP wrench in TCP frame: (Fx, Fy, Fz, Tx, Ty, Tz)
+        #             # ★ 注意这里是 ext_wrench_in_tcp，多了那个 p ★
+        #             leftRobotTCPWrench=list(left_robot_state.ext_wrench_in_tcp),
+        #             rightRobotTCPWrench=(
+        #                 list(right_robot_state.ext_wrench_in_tcp)
+        #                 if self.bimanual_teleop else [0.0] * 6
+        #             ),
+
+        #             # Gripper state: [width, force]
+        #             leftGripperState=[
+        #                 float(left_robot_gripper_state.width),
+        #                 float(left_robot_gripper_state.force),
+        #             ],
+        #             rightGripperState=(
+        #                 [
+        #                     float(right_robot_gripper_state.width),
+        #                     float(right_robot_gripper_state.force),
+        #                 ] if self.bimanual_teleop else [0.0] * 2
+        #             ),
+        #         )
+                
+        #     except Exception as e:
+               
+        #         # 打印出真正的异常信息，方便以后调试
+        #         logger.exception("Failed to build BimanualRobotStates")
+        #         raise HTTPException(status_code=500, detail=str(e))
+            
         @self.app.post('/move_gripper/{robot_side}')
         async def move_gripper(robot_side: str, request: MoveGripperRequest) -> Dict[str, str]:
             if robot_side not in ['left', 'right']:
@@ -141,10 +207,12 @@ class BimanualFlexivServer():
                 raise HTTPException(status_code=400, detail="Invalid robot side. Use 'left' or 'right'.")
             if not self.bimanual_teleop and robot_side == 'right':
                 raise HTTPException(status_code=400, detail="Right robot not available in single-arm mode.")
-
+            
+            
             robot = self.left_robot if robot_side == 'left' else self.right_robot
-
+            print("equest.target_tcp",request.target_tcp)
             robot.tcp_move(request.target_tcp)
+            print("jiedaolejjjjjjjjjjjjjjjjj")
             # logger.debug(f"{robot_side.capitalize()} robot moving to target tcp {request.target_tcp}")
             return {"message": f"{robot_side.capitalize()} robot moving to target tcp {request.target_tcp}"}
 

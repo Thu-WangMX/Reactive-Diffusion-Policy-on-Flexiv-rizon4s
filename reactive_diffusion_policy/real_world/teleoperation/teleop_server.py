@@ -69,7 +69,7 @@ class TeleopServer:
         self.fps = fps
         self.control_cycle_time = 1 / fps
         self.transforms = transforms
-        # gripper control parameters
+        # gripper control parametersq
         self.use_force_control_for_gripper = use_force_control_for_gripper
         self.max_gripper_width = max_gripper_width
         self.min_gripper_width = min_gripper_width
@@ -116,6 +116,7 @@ class TeleopServer:
     def setup_routes(self):
         @self.app.post('/unity')
         async def unity(mes: UnityMes):
+            #logger.debug(f"Received Unity message: {mes}") 
             self.msg_buffer.push(mes)
             return {'status': 'ok'}
 
@@ -161,6 +162,7 @@ class TeleopServer:
 
     def send_command(self, endpoint: str, data: dict = None):
         url = f"http://{self.robot_server_ip}:{self.robot_server_port}{endpoint}"
+        print(data)
         if 'get' in endpoint:
             response = self.session.get(url)
         else:
@@ -168,6 +170,8 @@ class TeleopServer:
                 # low-level control commands
                 try:
                     response = self.session.post(url, json=data, timeout=0.001)
+                    print("response",response)
+                    print(91919191911991191)
                 except requests.exceptions.ReadTimeout:
                     # Ignore the timeout error for low-level control commands to reduce latency
                     # TODO: use a more robust way to handle the timeout error
@@ -306,12 +310,13 @@ class TeleopServer:
             l_pos_from_unity = self.transforms.unity2robot_frame(np.array(mes.leftHand.wristPos + mes.leftHand.wristQuat), True)
             if self.bimanual_teleop:
                 r_pos_from_unity = self.transforms.unity2robot_frame(np.array(mes.rightHand.wristPos + mes.rightHand.wristQuat), False)
-
+            
             if self.left_homing_state:
                 logger.debug("left still in homing state")
                 self.left_tracking_state = False
             else:
                 if mes.leftHand.buttonState[4]:
+                    print(77777777777777777777777)
                     if not self.left_tracking_state:
                         self.set_start_tcp(left_tcp, l_pos_from_unity, is_left=True)
                         logger.info("left robot start tracking")
@@ -321,7 +326,14 @@ class TeleopServer:
                         self.send_command('/stop_gripper/left', {})
                         logger.info("left robot stop tracking")
                     self.left_tracking_state = False
-
+                    
+            print("mes.leftHand.buttonState[4]",mes.leftHand.buttonState[4])
+            #print("mes.rightHand.buttonState[4]",mes.rightHand.buttonState[4])
+            print("left_tracking_state",self.left_tracking_state)
+            #print("right_tracking_state",self.right_tracking_state)
+            # print("left_homing_state",self.left_homing_state)
+            # print("right_homing_state",self.right_homing_state)
+            
             if self.bimanual_teleop:
                 if self.right_homing_state:
                     logger.debug("right still in homing state")
@@ -355,6 +367,7 @@ class TeleopServer:
 
                         left_target = pose_6d_to_pose_7d(matrix4x4_to_pose_6d(self.transforms.world_to_left_robot_base_transform
                                                            @ pose_6d_to_4x4matrix(left_target_6d_in_world)))
+                        print("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
                     elif self.teleop_mode == TeleopMode.left_arm_3D_translation_Y_rotation:
                         # clip action to avoid collision with table
                         # clip r
@@ -365,8 +378,10 @@ class TeleopServer:
                         left_target = pose_6d_to_pose_7d(matrix4x4_to_pose_6d(self.transforms.world_to_left_robot_base_transform
                                                            @ pose_6d_to_4x4matrix(left_target_6d_in_world))
                         )
+                        print("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
                     elif self.teleop_mode == TeleopMode.left_arm_6DOF:
                         left_target = left_target_7d_in_robot
+                        print("cccccccccccccccccccccccccccccccccccccccccc")
                     elif self.teleop_mode == TeleopMode.dual_arm_3D_translation:
                         # clip action to avoid collision with table
                         # clip r
@@ -379,6 +394,7 @@ class TeleopServer:
                         left_target = pose_6d_to_pose_7d(
                             matrix4x4_to_pose_6d(self.transforms.world_to_left_robot_base_transform
                                                  @ pose_6d_to_4x4matrix(left_target_6d_in_world)))
+                        print("dddddddddddddddddddddddddddddddd")
                     else:
                         raise ValueError(f"Unsupported teleoperation mode: {self.teleop_mode}")
 
