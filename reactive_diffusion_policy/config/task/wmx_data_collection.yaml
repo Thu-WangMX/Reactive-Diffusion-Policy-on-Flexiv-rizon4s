@@ -12,7 +12,7 @@ teleop_server:
   gripper_control_width_precision: 0.01
   gripper_never_open: False
   # teleoperation mode
-  teleop_mode: 'left_arm_3D_translation'
+  teleop_mode: 'left_arm_6DOF'
   relative_translation_scale: 1.0  # for dexterous teleoperation
   bimanual_teleop: &bimanual_teleop False
 

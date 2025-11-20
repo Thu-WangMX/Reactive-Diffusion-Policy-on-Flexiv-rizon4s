@@ -102,6 +102,21 @@ class DataRecorder(Node):
         if self.data_converter is None:
             logger.warning("no calling data converter")
         
+        
+        filtered_subs_name_type = []
+        for name, msg_type in subs_name_type:
+            # 去掉所有 /right_* 的机器人状态话题
+            if name.startswith('/right_'):
+                continue
+            # 如果将来 device_mapping 里有右手腕/右夹爪相机，也一并过滤
+            if 'right_wrist_camera' in name:
+                continue
+            if 'right_gripper_camera' in name:
+                continue
+            filtered_subs_name_type.append((name, msg_type))
+        subs_name_type = filtered_subs_name_type
+        
+        
         for name, msg_type in subs_name_type:
             self.subscribers.append(Subscriber(self, msg_type, name))
             logger.debug(f"Subscribed to topic: {name} with type: {msg_type}")
@@ -117,6 +132,7 @@ class DataRecorder(Node):
         self.frame_count = 0
 
     def callback(self, *msgs):
+        print("[DataRecorder] Sync callback triggered!")
         topic_dict = dict()
         
         self.cnt += 1        

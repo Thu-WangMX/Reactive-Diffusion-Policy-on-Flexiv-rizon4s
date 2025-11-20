@@ -1,6 +1,6 @@
 numpy==1.26.4
 numba
-torch==1.13.1+cu117
+torch==1.13.1
 scipy
 opencv-python
 cffi

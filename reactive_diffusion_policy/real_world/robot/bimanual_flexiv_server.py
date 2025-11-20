@@ -93,7 +93,7 @@ class BimanualFlexivServer():
             if self.bimanual_teleop:
                 right_robot_state = self.right_robot.get_current_robot_states()
                 right_robot_gripper_state = self.right_robot.get_current_gripper_states()
-
+            
             return BimanualRobotStates(leftRobotTCP=left_robot_state.tcp_pose,
                                        rightRobotTCP=right_robot_state.tcp_pose if self.bimanual_teleop else [0.0]*7,
                                        leftRobotTCPVel=left_robot_state.tcp_vel,
@@ -171,7 +171,7 @@ class BimanualFlexivServer():
                 raise HTTPException(status_code=400, detail="Right robot not available in single-arm mode.")
 
             robot_gripper = self.left_robot.gripper if robot_side == 'left' else self.right_robot.gripper
-            robot_gripper.move(request.width, request.velocity, request.force_limit)
+            robot_gripper.Move(request.width, request.velocity, request.force_limit)
             return {
                 "message": f"{robot_side.capitalize()} gripper moving to width {request.width} "
                            f"with velocity {request.velocity} and force limit {request.force_limit}"}
@@ -185,7 +185,7 @@ class BimanualFlexivServer():
 
             robot_gripper = self.left_robot.gripper if robot_side == 'left' else self.right_robot.gripper
             # use force control mode to grasp
-            robot_gripper.grasp(request.force_limit)
+            robot_gripper.Grasp(request.force_limit)
             return {
                 "message": f"{robot_side.capitalize()} gripper grasp with force limit {request.force_limit}"}
 
@@ -198,7 +198,7 @@ class BimanualFlexivServer():
 
             robot_gripper = self.left_robot.gripper if robot_side == 'left' else self.right_robot.gripper   
 
-            robot_gripper.stop()
+            robot_gripper.Stop()
             return {"message": f"{robot_side.capitalize()} gripper stopping"}
 
         @self.app.post('/move_tcp/{robot_side}')
@@ -210,9 +210,9 @@ class BimanualFlexivServer():
             
             
             robot = self.left_robot if robot_side == 'left' else self.right_robot
-            print("equest.target_tcp",request.target_tcp)
+            #print("equest.target_tcp",request.target_tcp)
             robot.tcp_move(request.target_tcp)
-            print("jiedaolejjjjjjjjjjjjjjjjj")
+            #print("jiedaolejjjjjjjjjjjjjjjjj")
             # logger.debug(f"{robot_side.capitalize()} robot moving to target tcp {request.target_tcp}")
             return {"message": f"{robot_side.capitalize()} robot moving to target tcp {request.target_tcp}"}
 

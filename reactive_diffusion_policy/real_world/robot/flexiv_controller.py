@@ -58,7 +58,7 @@ class FlexivController:
             
             self.robot = flexivrdk.Robot(self.robot_sn)
             print(222222)
-            print(remote_control)
+
             if remote_control:
                 
                 if self.robot.fault():
@@ -94,14 +94,14 @@ class FlexivController:
                 if gripper_init:
                     self.gripper.Init()
                     time.sleep(10) #等待夹爪初始化完成
-
+                
                 # self.logger.info("Enabling gripper")
                 # #切换tcp至夹爪坐标系,默认坐标系是与示教器上一致
-                self.tool.Switch(gripper_name)
+                #self.tool.Switch(gripper_name)
                 
                 #self.log.info("Left robot is now operational")
                 self.robot.SwitchMode(self.mode.NRT_CARTESIAN_MOTION_FORCE) 
-            
+                print("已成功设置为笛卡尔力控模式")
         except Exception as e:
             #self.log.error("Error occurred while connecting to robot server: %s" % str(e))
             return None
@@ -190,37 +190,45 @@ class FlexivController:
         print(979797979)
         return eulerZYX
             
-    # def tcp_move(self, target_tcp):
-    #     self.robot.sendCartesianMotionForce(
-    #             target_tcp, 
-    #             [0.0]*6, 
-    #             0.5,
-    #             1.0)
-        
     def tcp_move(self, target_tcp):
-        # target_tcp: [x, y, z, q0, q1, q2, q3]
+        
         pos = target_tcp[:3]
-        quat = target_tcp[3:]  # 注意这里的顺序要和 quat2eulerZYX 要求的 [w,x,y,z] 对齐
-        print("quat",quat)
-        print(6868686868686868)
-        # 如果你的 target_tcp 存的是 [x,y,z,w]，那就直接传：
+        quat = target_tcp[3:]  
+        # target_tcp[3:] = [0.01265409 , 0.00165955,  0.99990422, -0.00534991]
+        #print("quat",target_tcp[3:])
+        #self.robot.SwitchMode(self.mode.NRT_CARTESIAN_MOTION_FORCE)
+        #print("机械臂正在tcp_move")
+        self.robot.SendCartesianMotionForce(
+                target_tcp, 
+                [0.0]*6, 
+                0.7)
+                #1.0)
+        print("机械臂执行一次tcp_move")
         
-        eulerZYX = (
-            R.from_quat([quat[0], quat[1], quat[2], quat[3]])
-            .as_euler("xyz", degrees=True)
-            .tolist()
-        )
-        print("eulerZYX",eulerZYX)
-        print(979797979)
+    # def tcp_move(self, target_tcp):
+    #     # target_tcp: [x, y, z, q0, q1, q2, q3]
+    #     pos = target_tcp[:3]
+    #     quat = target_tcp[3:]  # 注意这里的顺序要和 quat2eulerZYX 要求的 [w,x,y,z] 对齐
+    #     print("quat",quat)
+    #     print(6868686868686868)
+    #     # 如果你的 target_tcp 存的是 [x,y,z,w]，那就直接传：
         
-        #euler_deg = self.quat2eulerZYX(quat, degree=True)
-        #print("euler_deg",euler_deg)
-        #print(6868686868686868)
-        # 防御式：确保已经切到 Primitive 模式
-        self.switch_PRIMITIVE_Mode()
+    #     eulerZYX = (
+    #         R.from_quat([quat[0], quat[1], quat[2], quat[3]])
+    #         .as_euler("xyz", degrees=True)
+    #         .tolist()
+    #     )
+    #     print("eulerZYX",eulerZYX)
+    #     print(979797979)
+        
+    #     #euler_deg = self.quat2eulerZYX(quat, degree=True)
+    #     #print("euler_deg",euler_deg)
+    #     #print(6868686868686868)
+    #     # 防御式：确保已经切到 Primitive 模式
+    #     self.switch_PRIMITIVE_Mode()
 
-        # 用 MoveL 做一次性直线运动
-        self.MoveL(pos, eulerZYX, speed=0.01, acc=0.1)
+    #     # 用 MoveL 做一次性直线运动
+    #     self.MoveL(pos, eulerZYX, speed=0.01, acc=0.1)
 
     
     

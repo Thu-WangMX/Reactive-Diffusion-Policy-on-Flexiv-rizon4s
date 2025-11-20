@@ -53,39 +53,67 @@ class ROS2DataConverter:
     def convert_robot_states(self, topic_dict: Dict) -> (
             Tuple)[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         left_tcp_pose: PoseStamped = topic_dict['/left_tcp_pose']
-        right_tcp_pose: PoseStamped = topic_dict['/right_tcp_pose']
+        #right_tcp_pose: PoseStamped = topic_dict['/right_tcp_pose']
 
         left_gripper_state: JointState = topic_dict['/left_gripper_state']
-        right_gripper_state: JointState = topic_dict['/right_gripper_state']
+        #right_gripper_state: JointState = topic_dict['/right_gripper_state']
 
         left_tcp_vel: TwistStamped = topic_dict['/left_tcp_vel']
-        right_tcp_vel: TwistStamped = topic_dict['/right_tcp_vel']
+        #right_tcp_vel: TwistStamped = topic_dict['/right_tcp_vel']
 
         left_tcp_wrench: WrenchStamped = topic_dict['/left_tcp_wrench']
-        right_tcp_wrench: WrenchStamped = topic_dict['/right_tcp_wrench']
+        #right_tcp_wrench: WrenchStamped = topic_dict['/right_tcp_wrench']
 
         left_tcp_pose_array = ros_pose_to_6d_pose(left_tcp_pose.pose)
-        right_tcp_pose_array = ros_pose_to_6d_pose(right_tcp_pose.pose)
+        #right_tcp_pose_array = ros_pose_to_6d_pose(right_tcp_pose.pose)
 
         left_tcp_vel_array = np.array([left_tcp_vel.twist.linear.x, left_tcp_vel.twist.linear.y, left_tcp_vel.twist.linear.z,
                                  left_tcp_vel.twist.angular.x, left_tcp_vel.twist.angular.y,
                                  left_tcp_vel.twist.angular.z])
-        right_tcp_vel_array = np.array(
-            [right_tcp_vel.twist.linear.x, right_tcp_vel.twist.linear.y, right_tcp_vel.twist.linear.z,
-             right_tcp_vel.twist.angular.x, right_tcp_vel.twist.angular.y, right_tcp_vel.twist.angular.z])
+        # right_tcp_vel_array = np.array(
+        #     [right_tcp_vel.twist.linear.x, right_tcp_vel.twist.linear.y, right_tcp_vel.twist.linear.z,
+        #      right_tcp_vel.twist.angular.x, right_tcp_vel.twist.angular.y, right_tcp_vel.twist.angular.z])
 
         left_tcp_wrench_array = np.array(
             [left_tcp_wrench.wrench.force.x, left_tcp_wrench.wrench.force.y, left_tcp_wrench.wrench.force.z,
              left_tcp_wrench.wrench.torque.x, left_tcp_wrench.wrench.torque.y, left_tcp_wrench.wrench.torque.z])
-        right_tcp_wrench_array = np.array(
-            [right_tcp_wrench.wrench.force.x, right_tcp_wrench.wrench.force.y, right_tcp_wrench.wrench.force.z,
-             right_tcp_wrench.wrench.torque.x, right_tcp_wrench.wrench.torque.y, right_tcp_wrench.wrench.torque.z])
+        # right_tcp_wrench_array = np.array(
+        #     [right_tcp_wrench.wrench.force.x, right_tcp_wrench.wrench.force.y, right_tcp_wrench.wrench.force.z,
+        #      right_tcp_wrench.wrench.torque.x, right_tcp_wrench.wrench.torque.y, right_tcp_wrench.wrench.torque.z])
 
         left_gripper_state_array = np.array([left_gripper_state.position[0], left_gripper_state.effort[0]])
-        right_gripper_state_array = np.array([right_gripper_state.position[0], right_gripper_state.effort[0]])
+        # right_gripper_state_array = np.array([right_gripper_state.position[0], right_gripper_state.effort[0]])
+        
+        # 右臂相关：单臂模式下可能不存在，用 get() 拿
+        right_tcp_pose: PoseStamped = topic_dict.get('/right_tcp_pose', None)
+        right_gripper_state: JointState = topic_dict.get('/right_gripper_state', None)
+        right_tcp_vel: TwistStamped = topic_dict.get('/right_tcp_vel', None)
+        right_tcp_wrench: WrenchStamped = topic_dict.get('/right_tcp_wrench', None)
+         # 右臂数组：如果真的有 right_*，正常算；否则用左臂占位
+        if right_tcp_pose is not None and right_tcp_vel is not None and \
+           right_tcp_wrench is not None and right_gripper_state is not None:
+            right_tcp_pose_array = ros_pose_to_6d_pose(right_tcp_pose.pose)
+            right_tcp_vel_array = np.array([
+                right_tcp_vel.twist.linear.x, right_tcp_vel.twist.linear.y, right_tcp_vel.twist.linear.z,
+                right_tcp_vel.twist.angular.x, right_tcp_vel.twist.angular.y, right_tcp_vel.twist.angular.z
+            ])
+            right_tcp_wrench_array = np.array([
+                right_tcp_wrench.wrench.force.x, right_tcp_wrench.wrench.force.y, right_tcp_wrench.wrench.force.z,
+                right_tcp_wrench.wrench.torque.x, right_tcp_wrench.wrench.torque.y, right_tcp_wrench.wrench.torque.z
+            ])
+            right_gripper_state_array = np.array([right_gripper_state.position[0], right_gripper_state.effort[0]])
+        else:
+            # 单臂模式：右臂用左臂数据占位（方便后面结构统一）
+            right_tcp_pose_array = left_tcp_pose_array.copy()
+            right_tcp_vel_array = left_tcp_vel_array.copy()
+            right_tcp_wrench_array = left_tcp_wrench_array.copy()
+            right_gripper_state_array = left_gripper_state_array.copy()
 
-        return (left_tcp_pose_array, right_tcp_pose_array, left_tcp_vel_array, right_tcp_vel_array,
-                left_tcp_wrench_array, right_tcp_wrench_array, left_gripper_state_array, right_gripper_state_array)
+        return (left_tcp_pose_array, right_tcp_pose_array,
+                left_tcp_vel_array, right_tcp_vel_array,
+                left_tcp_wrench_array, right_tcp_wrench_array,
+                left_gripper_state_array, right_gripper_state_array)
+
     
     def decode_depth_rgb_image(self, msg: Image) -> np.ndarray:
         # Decode the image from JPEG format

@@ -94,6 +94,7 @@ class TeleopServer:
         self.session = requests.session()
         # Initialize the FastAPI server
         self.app = FastAPI()
+        
         self.setup_routes()
 
     def is_gripper_stable_open(self, gripper_width_history: Deque[float], current_force: float) -> bool:
@@ -115,7 +116,9 @@ class TeleopServer:
 
     def setup_routes(self):
         @self.app.post('/unity')
+        
         async def unity(mes: UnityMes):
+            #print(77777777777777778888888888888888822222222222)
             #logger.debug(f"Received Unity message: {mes}") 
             self.msg_buffer.push(mes)
             return {'status': 'ok'}
@@ -129,7 +132,7 @@ class TeleopServer:
             right_stable_open = self.is_gripper_stable_open(self.right_gripper_width_history, self.right_gripper_force) if self.bimanual_teleop else True
             # logger.debug(f"left gripper stable closed: {left_stable_closed}, right gripper stable closed: {right_stable_closed}")
             return {
-                "left_gripper_stable_closed": left_stable_closed,
+                "left_gripsper_stable_closed": left_stable_closed,
                 "right_gripper_stable_closed": right_stable_closed,
                 "left_gripper_stable_open": left_stable_open,
                 "right_gripper_stable_open": right_stable_open
@@ -171,7 +174,7 @@ class TeleopServer:
                 try:
                     response = self.session.post(url, json=data, timeout=0.001)
                     print("response",response)
-                    print(91919191911991191)
+                    #print(91919191911991191)
                 except requests.exceptions.ReadTimeout:
                     # Ignore the timeout error for low-level control commands to reduce latency
                     # TODO: use a more robust way to handle the timeout error
@@ -218,223 +221,232 @@ class TeleopServer:
             start_time = time.time()
             try:
                 mes, _, _ = self.msg_buffer.peek()
+                #print("mes",mes)
                 if mes is None and not (self.left_homing_state or self.right_homing_state):
                     precise_sleep(0.002)
                     continue
 
-            except Exception as e:
-                logger.exception(e)
+            
+                if self.left_homing_state or self.right_homing_state:
+                    continue
 
-            if self.left_homing_state or self.right_homing_state:
-                continue
+                max_gripper_width = self.max_gripper_width
+                min_gripper_width = self.min_gripper_width
+                grasp_force = self.grasp_force
+                gripper_control_width_precision = self.gripper_control_width_precision
+                gripper_control_time_interval = self.gripper_control_time_interval
+                valid_gripper_interval = max_gripper_width - min_gripper_width
+                robot_states = BimanualRobotStates.model_validate(self.send_command('/get_current_robot_states'))
+                #print("robot_states:",robot_states)
+                left_gripper_width_target = max_gripper_width - mes.leftHand.triggerState * valid_gripper_interval
+                left_tcp = np.array(robot_states.leftRobotTCP)
+                #print("left_tcp",left_tcp)
+                if self.bimanual_teleop:
+                    right_gripper_width_target = max_gripper_width - mes.rightHand.triggerState * valid_gripper_interval
+                    right_tcp = np.array(robot_states.rightRobotTCP)
 
-            max_gripper_width = self.max_gripper_width
-            min_gripper_width = self.min_gripper_width
-            grasp_force = self.grasp_force
-            gripper_control_width_precision = self.gripper_control_width_precision
-            gripper_control_time_interval = self.gripper_control_time_interval
-            valid_gripper_interval = max_gripper_width - min_gripper_width
-            robot_states = BimanualRobotStates.model_validate(self.send_command('/get_current_robot_states'))
+                # Update gripper force and width history
+                self.left_gripper_force = robot_states.leftGripperState[1]
+                self.left_gripper_width_history.append(robot_states.leftGripperState[0])
+                if self.bimanual_teleop:
+                    self.right_gripper_force = robot_states.rightGripperState[1]
+                    self.right_gripper_width_history.append(robot_states.rightGripperState[0])
 
-            left_gripper_width_target = max_gripper_width - mes.leftHand.triggerState * valid_gripper_interval
-            left_tcp = np.array(robot_states.leftRobotTCP)
-            if self.bimanual_teleop:
-                right_gripper_width_target = max_gripper_width - mes.rightHand.triggerState * valid_gripper_interval
-                right_tcp = np.array(robot_states.rightRobotTCP)
+                if self.gripper_interval_count == 0 and (self.left_tracking_state or self.right_tracking_state):
+                    # Clear fault in a fixed interval
+                    # TODO: clear fault in a lower frequency
+                    # self.send_command('/clear_fault', {})
 
-            # Update gripper force and width history
-            self.left_gripper_force = robot_states.leftGripperState[1]
-            self.left_gripper_width_history.append(robot_states.leftGripperState[0])
-            if self.bimanual_teleop:
-                self.right_gripper_force = robot_states.rightGripperState[1]
-                self.right_gripper_width_history.append(robot_states.rightGripperState[0])
-
-            if self.gripper_interval_count == 0 and (self.left_tracking_state or self.right_tracking_state):
-                # Clear fault in a fixed interval
-                # TODO: clear fault in a lower frequency
-                # self.send_command('/clear_fault', {})
-
-                # Send gripper command every N times to prevent blocking
-                left_current_width = robot_states.leftGripperState[0]
-                if abs(self.last_gripper_width_target[0] - left_gripper_width_target) >= gripper_control_width_precision:
-                    if self.use_force_control_for_gripper and self.last_gripper_width_target[0] > left_gripper_width_target:
-                        # try to close gripper with pure force control
-                        logger.debug(f"left gripper moving from {left_current_width} to target: {left_gripper_width_target} "
-                                     f"with force {grasp_force}")
-                        self.send_command('/move_gripper_force/left', {
-                            'velocity': 10.0,
-                            'force_limit': grasp_force
-                        })
-                    else:
-                        if self.gripper_never_open and left_current_width < left_gripper_width_target:
-                            pass
-                        else:
-                            # open gripper with position control
-                            logger.debug(f"left gripper moving from {left_current_width} to target: {left_gripper_width_target}")
-                            self.send_command('/move_gripper/left', {
-                                'width': left_gripper_width_target,
+                    # Send gripper command every N times to prevent blocking
+                    left_current_width = robot_states.leftGripperState[0]
+                    if abs(self.last_gripper_width_target[0] - left_gripper_width_target) >= gripper_control_width_precision:
+                        if self.use_force_control_for_gripper and self.last_gripper_width_target[0] > left_gripper_width_target:
+                            # try to close gripper with pure force control
+                            logger.debug(f"left gripper moving from {left_current_width} to target: {left_gripper_width_target} "
+                                        f"with force {grasp_force}")
+                            self.send_command('/move_gripper_force/left', {
+                                'width': left_gripper_width_target, 
                                 'velocity': 10.0,
                                 'force_limit': grasp_force
                             })
-                    self.last_gripper_width_target[0] = left_gripper_width_target
-
-                if self.bimanual_teleop:
-                    right_current_width = robot_states.rightGripperState[0]
-                    if abs(self.last_gripper_width_target[1] - right_gripper_width_target) >= gripper_control_width_precision:
-                        if self.use_force_control_for_gripper and self.last_gripper_width_target[1] > right_gripper_width_target:
-                            # try to close gripper with pure force control
-                            logger.debug(f"right gripper moving from {right_current_width} to target: {right_gripper_width_target} "
-                                        f"with force {grasp_force}")
-                            self.send_command('/move_gripper_force/right', {
-                                'force_limit': grasp_force,
-                                'velocity': self.gripper_velocity,
-                            })
                         else:
-                            if self.gripper_never_open and right_current_width < right_gripper_width_target:
+                            if self.gripper_never_open and left_current_width < left_gripper_width_target:
                                 pass
                             else:
                                 # open gripper with position control
-                                logger.debug(f"right gripper moving from {right_current_width} to target: {right_gripper_width_target}")
-                                self.send_command('/move_gripper/right', {
-                                    'width': right_gripper_width_target,
-                                    'velocity': self.gripper_velocity,
+                                logger.debug(f"left gripper moving from {left_current_width} to target: {left_gripper_width_target}")
+                                self.send_command('/move_gripper/left', {
+                                    'width': left_gripper_width_target,
+                                    'velocity': 0.1,
                                     'force_limit': grasp_force
                                 })
-                        self.last_gripper_width_target[1] = right_gripper_width_target
+                        self.last_gripper_width_target[0] = left_gripper_width_target
 
-            self.gripper_interval_count += 1
-            if self.gripper_interval_count % gripper_control_time_interval == 0:
-                self.gripper_interval_count = 0
+                    if self.bimanual_teleop:
+                        right_current_width = robot_states.rightGripperState[0]
+                        if abs(self.last_gripper_width_target[1] - right_gripper_width_target) >= gripper_control_width_precision:
+                            if self.use_force_control_for_gripper and self.last_gripper_width_target[1] > right_gripper_width_target:
+                                # try to close gripper with pure force control
+                                logger.debug(f"right gripper moving from {right_current_width} to target: {right_gripper_width_target} "
+                                            f"with force {grasp_force}")
+                                self.send_command('/move_gripper_force/right', {
+                                    'force_limit': grasp_force,
+                                    'velocity': self.gripper_velocity,
+                                })
+                            else:
+                                if self.gripper_never_open and right_current_width < right_gripper_width_target:
+                                    pass
+                                else:
+                                    # open gripper with position control
+                                    logger.debug(f"right gripper moving from {right_current_width} to target: {right_gripper_width_target}")
+                                    self.send_command('/move_gripper/right', {
+                                        'width': right_gripper_width_target,
+                                        'velocity': self.gripper_velocity,
+                                        'force_limit': grasp_force
+                                    })
+                            self.last_gripper_width_target[1] = right_gripper_width_target
 
-            # Get the target position from Unity and transform it to the robot base frame
-            l_pos_from_unity = self.transforms.unity2robot_frame(np.array(mes.leftHand.wristPos + mes.leftHand.wristQuat), True)
-            if self.bimanual_teleop:
-                r_pos_from_unity = self.transforms.unity2robot_frame(np.array(mes.rightHand.wristPos + mes.rightHand.wristQuat), False)
-            
-            if self.left_homing_state:
-                logger.debug("left still in homing state")
-                self.left_tracking_state = False
-            else:
-                if mes.leftHand.buttonState[4]:
-                    print(77777777777777777777777)
-                    if not self.left_tracking_state:
-                        self.set_start_tcp(left_tcp, l_pos_from_unity, is_left=True)
-                        logger.info("left robot start tracking")
-                    self.left_tracking_state = True
-                else:
-                    if self.left_tracking_state:
-                        self.send_command('/stop_gripper/left', {})
-                        logger.info("left robot stop tracking")
+                self.gripper_interval_count += 1
+                if self.gripper_interval_count % gripper_control_time_interval == 0:
+                    self.gripper_interval_count = 0
+
+                # Get the target position from Unity and transform it to the robot base frame
+                l_pos_from_unity = self.transforms.unity2robot_frame(np.array(mes.leftHand.wristPos + mes.leftHand.wristQuat), True)
+                #print("base坐标系下的手柄坐标",l_pos_from_unity)
+                if self.bimanual_teleop:
+                    r_pos_from_unity = self.transforms.unity2robot_frame(np.array(mes.rightHand.wristPos + mes.rightHand.wristQuat), False)
+                
+                if self.left_homing_state:
+                    logger.debug("left still in homing state")
                     self.left_tracking_state = False
-                    
-            print("mes.leftHand.buttonState[4]",mes.leftHand.buttonState[4])
-            #print("mes.rightHand.buttonState[4]",mes.rightHand.buttonState[4])
-            print("left_tracking_state",self.left_tracking_state)
-            #print("right_tracking_state",self.right_tracking_state)
-            # print("left_homing_state",self.left_homing_state)
-            # print("right_homing_state",self.right_homing_state)
-            
-            if self.bimanual_teleop:
-                if self.right_homing_state:
-                    logger.debug("right still in homing state")
-                    self.right_tracking_state = False
                 else:
-                    if mes.rightHand.buttonState[4]:
-                        if not self.right_tracking_state:
-                            self.set_start_tcp(right_tcp, r_pos_from_unity, is_left=False)
-                            logger.info("right robot start tracking")
-                        self.right_tracking_state = True
+                    if mes.leftHand.buttonState[4]:
+                        #print(77777777777777777777777)
+                        if not self.left_tracking_state:
+                            self.set_start_tcp(left_tcp, l_pos_from_unity, is_left=True)
+                            logger.info("left robot start tracking")
+                        self.left_tracking_state = True
                     else:
-                        if self.right_tracking_state:
-                            self.send_command('/stop_gripper/right', {})
-                            logger.info("right robot stop tracking")
-                        self.right_tracking_state = False
-
-            if not self.left_homing_state and not self.right_homing_state:
-                threshold = 0.3
-                if self.left_tracking_state:
-                    left_target_7d_in_robot = self.calc_relative_target(l_pos_from_unity, is_left=True)
-                    left_target_6d_in_world = matrix4x4_to_pose_6d(self.transforms.left_robot_base_to_world_transform
-                                                                   @ pose_7d_to_4x4matrix(left_target_7d_in_robot))
-                    if self.teleop_mode == TeleopMode.left_arm_3D_translation:
-                        # clip action to avoid collision with table
-                        # clip r
-                        left_target_6d_in_world[3] = np.clip(left_target_6d_in_world[3], -np.pi, -np.pi)
-                        # clip p
-                        left_target_6d_in_world[4] = np.clip(left_target_6d_in_world[4], 0, 0)
-                        # clip y
-                        left_target_6d_in_world[5] = np.clip(left_target_6d_in_world[5], np.pi, np.pi)
-
-                        left_target = pose_6d_to_pose_7d(matrix4x4_to_pose_6d(self.transforms.world_to_left_robot_base_transform
-                                                           @ pose_6d_to_4x4matrix(left_target_6d_in_world)))
-                        print("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-                    elif self.teleop_mode == TeleopMode.left_arm_3D_translation_Y_rotation:
-                        # clip action to avoid collision with table
-                        # clip r
-                        left_target_6d_in_world[3] = np.clip(left_target_6d_in_world[3], -np.pi, -np.pi)
-                        # clip y
-                        left_target_6d_in_world[5] = np.clip(left_target_6d_in_world[5], np.pi, np.pi)
-
-                        left_target = pose_6d_to_pose_7d(matrix4x4_to_pose_6d(self.transforms.world_to_left_robot_base_transform
-                                                           @ pose_6d_to_4x4matrix(left_target_6d_in_world))
-                        )
-                        print("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
-                    elif self.teleop_mode == TeleopMode.left_arm_6DOF:
-                        left_target = left_target_7d_in_robot
-                        print("cccccccccccccccccccccccccccccccccccccccccc")
-                    elif self.teleop_mode == TeleopMode.dual_arm_3D_translation:
-                        # clip action to avoid collision with table
-                        # clip r
-                        left_target_6d_in_world[3] = np.clip(left_target_6d_in_world[3], - np.pi / 2, - np.pi / 2)
-                        # clip p
-                        left_target_6d_in_world[4] = np.clip(left_target_6d_in_world[4], 0, 0)
-                        # clip y
-                        left_target_6d_in_world[5] = np.clip(left_target_6d_in_world[5],  np.pi, np.pi)
-
-                        left_target = pose_6d_to_pose_7d(
-                            matrix4x4_to_pose_6d(self.transforms.world_to_left_robot_base_transform
-                                                 @ pose_6d_to_4x4matrix(left_target_6d_in_world)))
-                        print("dddddddddddddddddddddddddddddddd")
-                    else:
-                        raise ValueError(f"Unsupported teleoperation mode: {self.teleop_mode}")
-
-                    if np.linalg.norm(left_target[:3] - left_tcp[:3]) > threshold:
                         if self.left_tracking_state:
-                            logger.info("left robot lost sync")
+                            self.send_command('/stop_gripper/left', {})
+                            logger.info("left robot stop tracking")
                         self.left_tracking_state = False
-                    else:
-                        self.send_command('/move_tcp/left', {'target_tcp': left_target.tolist()})
-
-                if self.bimanual_teleop and self.right_tracking_state:
-                    right_target_7d_in_robot = self.calc_relative_target(r_pos_from_unity, is_left=False)
-                    right_target_6d_in_world = matrix4x4_to_pose_6d(self.transforms.right_robot_base_to_world_transform
-                                                                     @ pose_7d_to_4x4matrix(right_target_7d_in_robot))
-                    if self.teleop_mode == TeleopMode.left_arm_3D_translation \
-                    or self.teleop_mode == TeleopMode.left_arm_3D_translation_Y_rotation \
-                    or self.teleop_mode == TeleopMode.left_arm_6DOF:
-                        right_target = right_target_7d_in_robot
-                    elif self.teleop_mode == TeleopMode.dual_arm_3D_translation:
-                        # clip action to avoid collision with table
-                        # clip r
-                        right_target_6d_in_world[3] = np.clip(right_target_6d_in_world[3], np.pi / 2, np.pi / 2)
-                        # clip p
-                        right_target_6d_in_world[4] = np.clip(right_target_6d_in_world[4], 0, 0)
-                        # clip y
-                        right_target_6d_in_world[5] = np.clip(right_target_6d_in_world[5], np.pi, np.pi)
-
-                        right_target = pose_6d_to_pose_7d(
-                            matrix4x4_to_pose_6d(self.transforms.world_to_right_robot_base_transform
-                                                 @ pose_6d_to_4x4matrix(right_target_6d_in_world)))
-                    else:
-                        raise ValueError(f"Unsupported teleoperation mode: {self.teleop_mode}")
-
-                    if np.linalg.norm(right_target[:3] - right_tcp[:3]) > threshold:
-                        if self.right_tracking_state:
-                            logger.info("right robot lost sync")
+                        
+                print("mes.leftHand.buttonState[4]",mes.leftHand.buttonState[4])
+                print("mes.leftHand.triggerState",mes.leftHand.triggerState)
+                #print("mes.rightHand.buttonState[4]",mes.rightHand.buttonState[4])
+                #print("left_tracking_state",self.left_tracking_state)
+                #print("right_tracking_state",self.right_tracking_state)
+                # print("left_homing_state",self.left_homing_state)
+                # print("right_homing_state",self.right_homing_state)
+                
+                if self.bimanual_teleop:
+                    if self.right_homing_state:
+                        logger.debug("right still in homing state")
                         self.right_tracking_state = False
                     else:
-                        self.send_command('/move_tcp/right', {'target_tcp': right_target.tolist()})
+                        if mes.rightHand.buttonState[4]:
+                            if not self.right_tracking_state:
+                                self.set_start_tcp(right_tcp, r_pos_from_unity, is_left=False)
+                                logger.info("right robot start tracking")
+                            self.right_tracking_state = True
+                        else:
+                            if self.right_tracking_state:
+                                self.send_command('/stop_gripper/right', {})
+                                logger.info("right robot stop tracking")
+                            self.right_tracking_state = False
 
-            # logger.debug(f"Received data from VR: {mes}")
-            end_time = time.time()
-            precise_sleep(self.control_cycle_time - (end_time - start_time))
+                if not self.left_homing_state and not self.right_homing_state:
+                    threshold = 0.3
+                    if self.left_tracking_state:
+                        left_target_7d_in_robot = self.calc_relative_target(l_pos_from_unity, is_left=True)
+                        
+                        left_target_6d_in_world = matrix4x4_to_pose_6d(self.transforms.left_robot_base_to_world_transform
+                                                                    @ pose_7d_to_4x4matrix(left_target_7d_in_robot))
+                        if self.teleop_mode == TeleopMode.left_arm_3D_translation:
+                            # clip action to avoid collision with table
+                            # clip r
+                            left_target_6d_in_world[3] = np.clip(left_target_6d_in_world[3], -np.pi, -np.pi)
+                            # clip p
+                            left_target_6d_in_world[4] = np.clip(left_target_6d_in_world[4], 0, 0)
+                            # clip y
+                            left_target_6d_in_world[5] = np.clip(left_target_6d_in_world[5], np.pi, np.pi)
+
+                            left_target = pose_6d_to_pose_7d(matrix4x4_to_pose_6d(self.transforms.world_to_left_robot_base_transform
+                                                            @ pose_6d_to_4x4matrix(left_target_6d_in_world)))
+                            #print("TeleopMode为:",self.teleop_mode)
+                        elif self.teleop_mode == TeleopMode.left_arm_3D_translation_Y_rotation:
+                            # clip action to avoid collision with table
+                            # clip r
+                            left_target_6d_in_world[3] = np.clip(left_target_6d_in_world[3], -np.pi, -np.pi)
+                            # clip y
+                            left_target_6d_in_world[5] = np.clip(left_target_6d_in_world[5], np.pi, np.pi)
+
+                            left_target = pose_6d_to_pose_7d(matrix4x4_to_pose_6d(self.transforms.world_to_left_robot_base_transform
+                                                            @ pose_6d_to_4x4matrix(left_target_6d_in_world))
+                            )
+                            print("TeleopMode为:",self.teleop_mode)
+                        elif self.teleop_mode == TeleopMode.left_arm_6DOF:
+                            left_target = left_target_7d_in_robot
+                            print("TeleopMode为:",self.teleop_mode)
+                        elif self.teleop_mode == TeleopMode.dual_arm_3D_translation:
+                            # clip action to avoid collision with table
+                            # clip r
+                            left_target_6d_in_world[3] = np.clip(left_target_6d_in_world[3], - np.pi / 2, - np.pi / 2)
+                            # clip p
+                            left_target_6d_in_world[4] = np.clip(left_target_6d_in_world[4], 0, 0)
+                            # clip y
+                            left_target_6d_in_world[5] = np.clip(left_target_6d_in_world[5],  np.pi, np.pi)
+
+                            left_target = pose_6d_to_pose_7d(
+                                matrix4x4_to_pose_6d(self.transforms.world_to_left_robot_base_transform
+                                                    @ pose_6d_to_4x4matrix(left_target_6d_in_world)))
+                            print("TeleopMode为:",self.teleop_mode)
+                        else:
+                            raise ValueError(f"Unsupported teleoperation mode: {self.teleop_mode}")
+
+                        if np.linalg.norm(left_target[:3] - left_tcp[:3]) > threshold:
+                            if self.left_tracking_state:
+                                logger.info("left robot lost sync")
+                            self.left_tracking_state = False
+                        else:
+                            self.send_command('/move_tcp/left', {'target_tcp': left_target.tolist()})
+                        
+                            #print("开始发送机械臂移动指令为", left_target)
+                            
+                    if self.bimanual_teleop and self.right_tracking_state:
+                        right_target_7d_in_robot = self.calc_relative_target(r_pos_from_unity, is_left=False)
+                        right_target_6d_in_world = matrix4x4_to_pose_6d(self.transforms.right_robot_base_to_world_transform
+                                                                        @ pose_7d_to_4x4matrix(right_target_7d_in_robot))
+                        if self.teleop_mode == TeleopMode.left_arm_3D_translation \
+                        or self.teleop_mode == TeleopMode.left_arm_3D_translation_Y_rotation \
+                        or self.teleop_mode == TeleopMode.left_arm_6DOF:
+                            right_target = right_target_7d_in_robot
+                        elif self.teleop_mode == TeleopMode.dual_arm_3D_translation:
+                            # clip action to avoid collision with table
+                            # clip r
+                            right_target_6d_in_world[3] = np.clip(right_target_6d_in_world[3], np.pi / 2, np.pi / 2)
+                            # clip p
+                            right_target_6d_in_world[4] = np.clip(right_target_6d_in_world[4], 0, 0)
+                            # clip y
+                            right_target_6d_in_world[5] = np.clip(right_target_6d_in_world[5], np.pi, np.pi)
+
+                            right_target = pose_6d_to_pose_7d(
+                                matrix4x4_to_pose_6d(self.transforms.world_to_right_robot_base_transform
+                                                    @ pose_6d_to_4x4matrix(right_target_6d_in_world)))
+                        else:
+                            raise ValueError(f"Unsupported teleoperation mode: {self.teleop_mode}")
+
+                        if np.linalg.norm(right_target[:3] - right_tcp[:3]) > threshold:
+                            if self.right_tracking_state:
+                                logger.info("right robot lost sync")
+                            self.right_tracking_state = False
+                        else:
+                            self.send_command('/move_tcp/right', {'target_tcp': right_target.tolist()})
+
+                # logger.debug(f"Received data from VR: {mes}")
+                end_time = time.time()
+                precise_sleep(self.control_cycle_time - (end_time - start_time))
+            
+            except Exception as e:
+                logger.exception(e)

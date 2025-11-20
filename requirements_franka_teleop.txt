@@ -1,0 +1,55 @@
+# franka遥操，不能用于策略训练和评估
+#numpy==1.26.4
+#torch==1.13.1
+# numba
+# scipy
+# opencv-python
+# cffi
+# matplotlib        # 画图可视化，建议保留
+# zarr
+# numcodecs
+# h5py
+# hydra-core
+# einops
+# tqdm
+# dill
+# scikit-video
+# scikit-image
+# imageio
+# imageio-ffmpeg
+# termcolor
+# psutil
+# click
+
+# teleop 相关
+fastapi
+uvicorn
+pyrealsense2
+pydantic
+loguru
+bson
+open3d
+transforms3d
+pyinstrument
+py_cli_interaction
+pygame
+
+numba
+scipy
+opencv-python
+cffi
+matplotlib
+zarr
+numcodecs
+h5py
+hydra-core       # 1.0.6（自动拉上 omegaconf 2.0.6）
+einops
+tqdm
+dill
+scikit-video
+scikit-image
+imageio
+imageio-ffmpeg
+termcolor
+psutil
+click

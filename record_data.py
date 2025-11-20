@@ -29,42 +29,79 @@ cores_to_bind = set(range(min(num_cores_to_bind, total_cores)))
 # Set CPU affinity for the current process to the first ten cores
 os.sched_setaffinity(0, cores_to_bind)
 
-def main(args=None):
-    import argparse
-    # Parse command line arguments
-    parser = argparse.ArgumentParser(description='Data Recorder')
-    parser.add_argument('--save_file_dir', type=str, default='tests')
-    parser.add_argument('--save_file_name', type=str, default='test.pkl', help='File name of the save file')
-    parser.add_argument('--save_to_disk', action='store_true', default=False, help='Whether to save the data to disk')
-    parser.add_argument('--debug', action='store_true', default=False, help='Whether to print debug messages')
-    args = parser.parse_args()
+# def main(args=None):
+#     import argparse
+#     # Parse command line arguments
+#     parser = argparse.ArgumentParser(description='Data Recorder')
+#     parser.add_argument('--save_file_dir', type=str, default='tests')
+#     parser.add_argument('--save_file_name', type=str, default='test.pkl', help='File name of the save file')
+#     parser.add_argument('--save_to_disk', action='store_true', default=True, help='Whether to save the data to disk')
+#     parser.add_argument('--debug', action='store_true', default=False, help='Whether to print debug messages')
+#     args = parser.parse_args()
         
+#     with initialize(config_path='reactive_diffusion_policy/config', version_base="1.1"):
+#         cfg = compose(config_name="real_world_env")
+
+#     rclpy_args = sys.argv
+#     rclpy.init(args=rclpy_args)
+    
+
+#     base_dir = f'/home/wmx/myspace/RDP/data/{args.save_file_dir}'
+#     save_path = osp.join(base_dir, args.save_file_name)
+    
+#     transforms = RealWorldTransforms(option=cfg.task.transforms)
+#     node = DataRecorder(transforms,
+#                         save_path=save_path,
+#                         debug=args.debug,
+#                         device_mapping_server_ip=cfg.task.device_mapping_server.host_ip,
+#                         device_mapping_server_port=cfg.task.device_mapping_server.port)
+#     try:
+#         rclpy.spin(node)
+#     except KeyboardInterrupt:
+#         if args.save_to_disk:
+#             node.save()
+#         else:
+#             logger.info("Data not saved to disk, quitting program now...")
+#     finally:
+#         node.destroy_node()
+        
+def main(args=None):
+    # ====== 这里直接写死配置 ======
+    save_to_disk = True                      # 等价于传了 --save_to_disk
+    save_file_dir = 'test1'          # 等价于 --save_file_dir wmx_push_task
+    save_file_name = 'seq_0001.pkl'          # 等价于 --save_file_name seq_0001.pkl,保存到/home/wmx/myspace/RDP/data/wmx_push_task/seq_0001.pkl
+    debug = False                            # 需要调试日志就改成 True
+    # =================================
+
     with initialize(config_path='reactive_diffusion_policy/config', version_base="1.1"):
         cfg = compose(config_name="real_world_env")
 
     rclpy_args = sys.argv
     rclpy.init(args=rclpy_args)
-    
 
-    base_dir = f'/home/wendi/Desktop/reactive_diffusion_policy/data/{args.save_file_dir}'
-    save_path = osp.join(base_dir, args.save_file_name)
-    
+    base_dir = f'/home/wmx/myspace/RDP/data/{save_file_dir}'
+    os.makedirs(base_dir, exist_ok=True)
+    save_path = osp.join(base_dir, save_file_name)
+
     transforms = RealWorldTransforms(option=cfg.task.transforms)
-    node = DataRecorder(transforms,
-                        save_path=save_path,
-                        debug=args.debug,
-                        device_mapping_server_ip=cfg.task.device_mapping_server.host_ip,
-                        device_mapping_server_port=cfg.task.device_mapping_server.port)
+    node = DataRecorder(
+        transforms,
+        save_path=save_path,
+        debug=debug,
+        device_mapping_server_ip=cfg.task.device_mapping_server.host_ip,
+        device_mapping_server_port=cfg.task.device_mapping_server.port
+    )
+
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
-        if args.save_to_disk:
+        if save_to_disk:
             node.save()
         else:
             logger.info("Data not saved to disk, quitting program now...")
     finally:
         node.destroy_node()
-
+        rclpy.shutdown()
 
 if __name__ == '__main__':
     main()

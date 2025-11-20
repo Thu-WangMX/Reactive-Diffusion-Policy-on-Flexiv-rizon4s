@@ -154,5 +154,5 @@ def main(cfg: DictConfig):
         logger.info("All Camera publishers shutdown")
 
 if __name__ == "__main__":
-    print(22222222)
+    
     main()
