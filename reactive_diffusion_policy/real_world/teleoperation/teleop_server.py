@@ -333,12 +333,9 @@ class TeleopServer:
                         self.left_tracking_state = False
                         
                 print("mes.leftHand.buttonState[4]",mes.leftHand.buttonState[4])
-                print("mes.leftHand.triggerState",mes.leftHand.triggerState)
-                #print("mes.rightHand.buttonState[4]",mes.rightHand.buttonState[4])
+                # print("mes.leftHand.triggerState",mes.leftHand.triggerState)
                 #print("left_tracking_state",self.left_tracking_state)
-                #print("right_tracking_state",self.right_tracking_state)
-                # print("left_homing_state",self.left_homing_state)
-                # print("right_homing_state",self.right_homing_state)
+
                 
                 if self.bimanual_teleop:
                     if self.right_homing_state:

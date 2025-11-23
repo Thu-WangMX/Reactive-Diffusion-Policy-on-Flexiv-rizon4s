@@ -51,7 +51,8 @@ class ROS2DataConverter:
         o3d.visualization.draw_geometries([world, left_tcp, left_base, right_tcp, right_base])
 
     def convert_robot_states(self, topic_dict: Dict) -> (
-            Tuple)[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+            Tuple)[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, 
+                   Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray]]:
         left_tcp_pose: PoseStamped = topic_dict['/left_tcp_pose']
         #right_tcp_pose: PoseStamped = topic_dict['/right_tcp_pose']
 
@@ -108,11 +109,33 @@ class ROS2DataConverter:
             right_tcp_vel_array = left_tcp_vel_array.copy()
             right_tcp_wrench_array = left_tcp_wrench_array.copy()
             right_gripper_state_array = left_gripper_state_array.copy()
+            
+            
+            # === 新增：左臂关节状态，从 `/left_joint_state` 取 ===
+        left_joint_state: JointState = topic_dict.get('/left_joint_state', None)
+        if left_joint_state is not None and len(left_joint_state.position) > 0:
+            left_q_array = np.array(left_joint_state.position, dtype=np.float32)
+            left_tau_array = np.array(left_joint_state.effort, dtype=np.float32)
+            left_tau_ext_array = np.array(left_joint_state.velocity, dtype=np.float32)
+        else:
+            # 没有这个 topic 的时候，给 None 或者零数组都行，看你后处理习惯
+            left_q_array = None
+            left_tau_array = None
+            left_tau_ext_array = None
 
-        return (left_tcp_pose_array, right_tcp_pose_array,
-                left_tcp_vel_array, right_tcp_vel_array,
-                left_tcp_wrench_array, right_tcp_wrench_array,
-                left_gripper_state_array, right_gripper_state_array)
+        # 最后 return 加上这三项
+        return (
+            left_tcp_pose_array, right_tcp_pose_array,
+            left_tcp_vel_array, right_tcp_vel_array,
+            left_tcp_wrench_array, right_tcp_wrench_array,
+            left_gripper_state_array, right_gripper_state_array,
+            left_q_array, left_tau_array, left_tau_ext_array
+        )
+
+        # return (left_tcp_pose_array, right_tcp_pose_array,
+        #         left_tcp_vel_array, right_tcp_vel_array,
+        #         left_tcp_wrench_array, right_tcp_wrench_array,
+        #         left_gripper_state_array, right_gripper_state_array)
 
     
     def decode_depth_rgb_image(self, msg: Image) -> np.ndarray:
@@ -207,9 +230,19 @@ class ROS2DataConverter:
         latest_timestamp = max([msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
                                 for msg in topic_dict.values()])
 
-        (left_tcp_pose, right_tcp_pose, left_tcp_vel, right_tcp_vel,
-         left_tcp_wrench, right_tcp_wrench, left_gripper_state, right_gripper_state) = (
-            self.convert_robot_states(topic_dict))
+        # (left_tcp_pose, right_tcp_pose, left_tcp_vel, right_tcp_vel,
+        #  left_tcp_wrench, right_tcp_wrench, left_gripper_state, right_gripper_state) = (
+        #     self.convert_robot_states(topic_dict))
+         
+        #新增
+        (left_tcp_pose, right_tcp_pose,
+         left_tcp_vel, right_tcp_vel,
+         left_tcp_wrench, right_tcp_wrench,
+         left_gripper_state, right_gripper_state,
+         left_q, left_tau, left_tau_ext
+         ) = self.convert_robot_states(topic_dict)
+        
+        
         depth_camera_pointcloud_list, depth_camera_rgb_list = self.convert_depth_camera(topic_dict)
         tactile_camera_rgb_list, tactile_camera_marker_loc_list, tactile_camera_marker_offset_list = self.convert_tactile_camera(topic_dict)
 
@@ -224,7 +257,16 @@ class ROS2DataConverter:
             'leftRobotGripperState': left_gripper_state,
             'rightRobotGripperState': right_gripper_state,
         }
-
+        
+        #新增
+        if left_q is not None:
+            sensor_msg_args['leftRobotQ'] = left_q
+        if left_tau is not None:
+            sensor_msg_args['leftRobotTau'] = left_tau
+        if left_tau_ext is not None:
+            sensor_msg_args['leftRobotTauExt'] = left_tau_ext
+        #新增结束
+        
         if depth_camera_pointcloud_list[0] is not None:
             sensor_msg_args['externalCameraPointCloud'] = depth_camera_pointcloud_list[0]
         if depth_camera_rgb_list[0] is not None:

@@ -25,7 +25,9 @@ def get_topic_and_type(device_to_topic: DeviceToTopic):
         ('/left_tcp_vel', TwistStamped),
         ('/right_tcp_vel', TwistStamped),
         ('/left_tcp_wrench', WrenchStamped),
-        ('/right_tcp_wrench', WrenchStamped)
+        ('/right_tcp_wrench', WrenchStamped),
+        # 新增：左臂关节状态
+        ('/left_joint_state', JointState)
     ])
 
     return subs_name_type

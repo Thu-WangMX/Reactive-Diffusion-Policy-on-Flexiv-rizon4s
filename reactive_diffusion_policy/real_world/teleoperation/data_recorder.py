@@ -132,7 +132,7 @@ class DataRecorder(Node):
         self.frame_count = 0
 
     def callback(self, *msgs):
-        print("[DataRecorder] Sync callback triggered!")
+        #print("[DataRecorder] Sync callback triggered!")
         topic_dict = dict()
         
         self.cnt += 1        

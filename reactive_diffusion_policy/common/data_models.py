@@ -39,7 +39,11 @@ class BimanualRobotStates(BaseModel):
     rightRobotTCPWrench: List[float] = [0.0] * 6  # (6) (fx, fy, fz, mx, my, mz)
     leftGripperState: List[float] = [0.0] * 2  # (2) (width, force)
     rightGripperState: List[float] = [0.0] * 2  # (2) (width, force)
-
+    #新增
+    leftRobotQ: List[float] = [0.0] * 7
+    leftRobotTau: List[float] = [0.0] * 7
+    leftRobotTauExt: List[float] = [0.0] * 7
+    
 class MoveGripperRequest(BaseModel):
     width: float = 0.05
     velocity: float = 10.0
@@ -62,6 +66,12 @@ class SensorMessage(BaseModel):
     rightRobotTCPWrench: np.ndarray = Field(default_factory=lambda: np.zeros((6, ), dtype=np.float32))  # (6) (fx, fy, fz, mx, my, mz)
     leftRobotGripperState: np.ndarray = Field(default_factory=lambda: np.zeros((2, ), dtype=np.float32))  # (2) gripper (width, force)
     rightRobotGripperState: np.ndarray = Field(default_factory=lambda: np.zeros((2, ), dtype=np.float32))  # (2) gripper (width, force)
+    
+    #新增
+    leftRobotQ: np.ndarray = Field(default_factory=lambda: np.zeros((7, ), dtype=np.float32)) 
+    leftRobotTau: np.ndarray = Field(default_factory=lambda: np.zeros((7, ), dtype=np.float32)) 
+    leftRobotTauExt: np.ndarray = Field(default_factory=lambda: np.zeros((7, ), dtype=np.float32)) 
+    
     externalCameraPointCloud: np.ndarray = Field(default_factory=lambda: np.zeros((10, 6), dtype=np.float16)) # (N, 6) (x, y, z, r, g, b)
     externalCameraRGB: np.ndarray = Field(default_factory=lambda: np.zeros((48, 64, 3), dtype=np.uint8))  # (H, W, 3) (r, g, b)
     leftWristCameraPointCloud: np.ndarray = Field(default_factory=lambda: np.zeros((10, 6), dtype=np.float16))  # (N, 6) (x, y, z, r, g, b)

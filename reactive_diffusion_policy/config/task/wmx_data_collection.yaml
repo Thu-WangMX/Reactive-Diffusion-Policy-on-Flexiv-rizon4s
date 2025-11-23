@@ -22,16 +22,16 @@ robot_server:
 publisher:
   # two realsense cameras
   realsense_camera_publisher: 
-    # - camera_serial_number: '036422060422'
-    #   camera_type: 'D400'
-    #   camera_name: 'external_camera'
-    #   rgb_resolution: [640, 480]
-    #   depth_resolution: [640, 480]
-    #   random_sample_point_num: 3000
-    #   fps: 24
-    #   decimate: 2  # (0-4) decimation_filter magnitude for point cloud
-    #   cpu_core_id:
-    #     - 10
+    - camera_serial_number: '213622074024'
+      camera_type: 'D400'
+      camera_name: 'external_camera'
+      rgb_resolution: [640, 480]
+      depth_resolution: [640, 480]
+      random_sample_point_num: 3000
+      fps: 24
+      decimate: 2  # (0-4) decimation_filter magnitude for point cloud
+      cpu_core_id:
+        - 10
     - camera_serial_number: '150622073398'
       camera_type: 'D400'  
       camera_name: 'left_wrist_camera'

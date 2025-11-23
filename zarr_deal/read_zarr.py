@@ -12,14 +12,29 @@ print("Keys in replay_buffer.zarr:")
 print(list(root.array_keys()))
 print()
 
-# 只取前 N 帧
-N = 3  # 想多看就改大一点
-left_wrist_img = root["left_wrist_img"][:N]        # (N, H, W, 3)
-left_tcp_pose   = root["left_robot_tcp_wrench"][:N]  # (N, 9)
+# 只取后 N 帧
+N = 1  # 想多看就改大一点
 
+# 安全起见，防止 N > 总长度
+T = root["timestamp"].shape[0]
+N = min(N, T)
+
+# 读取后 N 帧
+left_wrist_img        = root["left_wrist_img"][-N:]         # (N, H, W, 3)
+external_img          = root["external_img"][-N:]           # (N, H, W, 3)
+left_tcp_pose         = root["left_robot_tcp_pose"][-N:]    # (N, 9)
+left_tcp_wrench       = root["left_robot_tcp_wrench"][-N:]  # (N, 6)
+left_q                = root["left_robot_q"][-N:]           # (N, J)
+left_tau              = root["left_robot_tau"][-N:]         # (N, J)
+# left_q                = root["left_robot_q"][:N]           # (N, J)
+# left_tau              = root["left_robot_tau"][:N]        # (N, J)
 # 打印基本信息
 print(f"left_wrist_img shape: {left_wrist_img.shape}, dtype: {left_wrist_img.dtype}")
+print(f"external_img shape: {external_img.shape}, dtype: {external_img.dtype}")
 print(f"left_robot_tcp_pose shape: {left_tcp_pose.shape}, dtype: {left_tcp_pose.dtype}")
+print(f"left_robot_tcp_wrench shape: {left_tcp_wrench.shape}, dtype: {left_tcp_wrench.dtype}")
+print(f"left_robot_q shape: {left_q.shape}, dtype: {left_q.dtype}")
+print(f"left_robot_tau shape: {left_tau.shape}, dtype: {left_tau.dtype}")
 print()
 
 # 为了打印更好看一点，设置 numpy 打印选项
@@ -27,33 +42,26 @@ np.set_printoptions(precision=4, suppress=True, linewidth=120)
 
 # 逐帧打印
 for i in range(N):
-    print(f"===== Frame {i} =====")
+    print(f"===== Frame {T - N + i} (index {i} in this slice) =====")
+
     # 打印位姿向量（9维：3个位置 + 6个旋转）
     print("left_robot_tcp_pose:", left_tcp_pose[i])
+    print("left_robot_tcp_wrench:", left_tcp_wrench[i])
+    print("left_robot_q:", left_q[i])
+    print("left_robot_tau:", left_tau[i])
 
-    # 图像整体打印会非常长，这里给你几种常用方式任选：
+    # 图像打印统计信息
+    wrist = left_wrist_img[i]
+    ext   = external_img[i]
 
-    # 1) 打印图像的整体统计信息（推荐）
-    img = left_wrist_img[i]
     print("left_wrist_img stats:")
-    print("  shape:", img.shape)
-    print("  min:", img.min(), "max:", img.max(), "mean:", img.mean(), "std:", img.std())
-# import zarr
-# import matplotlib.pyplot as plt
+    print("  shape:", wrist.shape,
+          "min:", wrist.min(), "max:", wrist.max(),
+          "mean:", wrist.mean(), "std:", wrist.std())
 
-# zarr_path = "/home/wmx/myspace/RDP/data/test1_downsample1_zarr/replay_buffer.zarr/data"
-# root = zarr.open(zarr_path, mode="r")
+    print("external_img stats:")
+    print("  shape:", ext.shape,
+          "min:", ext.min(), "max:", ext.max(),
+          "mean:", ext.mean(), "std:", ext.std())
 
-# print("Keys:", list(root.array_keys()))
-
-# # 取第 k 帧的图像
-# k = 0  # 想看第几帧就改这里
-# img = root["left_wrist_img"][k]  # shape: (240, 320, 3), uint8
-
-# print("Frame", k, "img shape:", img.shape, "dtype:", img.dtype)
-
-# plt.figure(figsize=(4, 4))
-# plt.imshow(img)       # zarr 里是 HWC、RGB 顺序，直接 imshow 即可
-# plt.axis("off")
-# plt.title(f"left_wrist_img frame {k}")
-# plt.show()
+    print()

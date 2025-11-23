@@ -57,6 +57,7 @@ class FlexivController:
             print(1111111122333)
             
             self.robot = flexivrdk.Robot(self.robot_sn)
+ 
             print(222222)
 
             if remote_control:

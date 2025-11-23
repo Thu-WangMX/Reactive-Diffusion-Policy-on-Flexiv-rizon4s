@@ -35,7 +35,7 @@ try:
     print(f"  - 姿态 [rx, ry, rz] (度): {np.round(euler_degrees, 4)}")
     print("--------------------------------------------------")
 
-    current_pos, current_euler_deg = robot.read_pose(Euler_flag=True)
+    #current_pos, current_euler_deg = robot.read_pose(Euler_flag=True)
     #start_pose = Pose.from_xyz_rpy(current_pos, current_euler_deg)
 
 

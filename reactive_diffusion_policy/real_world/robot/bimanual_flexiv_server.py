@@ -103,7 +103,13 @@ class BimanualFlexivServer():
                                        leftGripperState=[left_robot_gripper_width, 
                                                          left_robot_gripper_force],
                                        rightGripperState=[right_robot_gripper_state.width, 
-                                                          right_robot_gripper_state.force] if self.bimanual_teleop else [0.0]*2)
+                                                          right_robot_gripper_state.force] if self.bimanual_teleop else [0.0]*2,
+                                        # 新增：只记录左臂的关节信息
+                                        leftRobotQ=left_robot_state.q,
+                                        leftRobotTau=left_robot_state.tau,
+                                        leftRobotTauExt=left_robot_state.tau_ext
+                                        )
+                                       
 
 
         # @self.app.get('/get_current_robot_states')

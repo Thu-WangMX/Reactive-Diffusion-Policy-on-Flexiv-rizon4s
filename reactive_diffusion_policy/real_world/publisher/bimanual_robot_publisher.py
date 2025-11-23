@@ -58,6 +58,10 @@ class BimanualRobotPublisher(Node):
         if self.bimanual_teleop:
             self.right_tcp_vel_publisher = self.create_publisher(TwistStamped, 'right_tcp_vel', 10)
             self.right_tcp_wrench_publisher = self.create_publisher(WrenchStamped, 'right_tcp_wrench', 10)
+            
+        
+        # ---> 新增：左臂关节状态（把 q / tau / tau_ext 都塞进去）
+        self.left_joint_state_publisher = self.create_publisher(JointState, 'left_joint_state', 10)
 
         self.timer = self.create_timer(1 / fps, self.timer_callback)
         # Create a session with robot server
@@ -250,6 +254,29 @@ class BimanualRobotPublisher(Node):
             right_tcp_wrench_msg.wrench.torque.z = robot_states.rightRobotTCPWrench[5]
             self.right_tcp_wrench_publisher.publish(right_tcp_wrench_msg)
 
+
+        # === 新增：发布左臂关节状态 ===
+        if getattr(robot_states, "leftRobotQ", None) is not None \
+            and getattr(robot_states, "leftRobotTau", None) is not None \
+            and getattr(robot_states, "leftRobotTauExt", None) is not None:
+
+            joint_msg = JointState()
+            joint_msg.header = Header()
+            joint_msg.header.stamp = timestamp
+
+            n_joints = len(robot_states.leftRobotQ)
+            joint_msg.name = [f"left_joint_{i+1}" for i in range(n_joints)]
+
+            # 约定：
+            # position  存 q
+            # effort    存 tau
+            # velocity  存 tau_ext
+            joint_msg.position = list(robot_states.leftRobotQ)
+            joint_msg.effort   = list(robot_states.leftRobotTau)
+            joint_msg.velocity = list(robot_states.leftRobotTauExt)
+
+            self.left_joint_state_publisher.publish(joint_msg)
+        
         # Calculate fps
         self.frame_count += 1
         current_time = time.time()

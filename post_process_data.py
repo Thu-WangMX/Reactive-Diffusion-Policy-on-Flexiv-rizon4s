@@ -19,7 +19,7 @@ DEBUG_TACTILE_LATENCY = False  # for debugging tactile latency
 DRAW_FORCE = False  # for debugging force
 USE_ABSOLUTE_ACTION = True
 
-TAG = 'test1'
+TAG = 'test1' #任务名称
 ACTION_DIM = 10  # (4 + 15)
 TEMPORAL_DOWNSAMPLE_RATIO = 1  # the ratio for temporal down-sampling
 SENSOR_MODE = 'single_arm_two_realsense_two_tactile'
@@ -109,6 +109,11 @@ if __name__ == '__main__':
     right_robot_tcp_wrench_arrays = []
     right_robot_gripper_width_arrays = []
     right_robot_gripper_force_arrays = []
+    
+    # 新增：只记录左臂的关节信息
+    left_robot_q_arrays = []
+    left_robot_tau_arrays = []
+    left_robot_tau_ext_arrays = []
 
     episode_ends_arrays = []
     total_count = 0
@@ -147,7 +152,32 @@ if __name__ == '__main__':
             right_robot_tcp_wrench_arrays.append(obs_dict['right_robot_tcp_wrench'])
             right_robot_gripper_width_arrays.append(obs_dict['right_robot_gripper_width'])
             right_robot_gripper_force_arrays.append(obs_dict['right_robot_gripper_force'])
+            
+            # 新增：从 sensor_msg 里直接取左臂关节量
+            # SensorMessage 里字段名是 leftRobotQ / leftRobotTau / leftRobotTauExt
+            if hasattr(sensor_msg, "leftRobotQ"):
+                left_robot_q_arrays.append(
+                    np.array(sensor_msg.leftRobotQ, dtype=np.float32)
+                )
+            else:
+                # 防御式写法，万一老数据没有这个字段
+                left_robot_q_arrays.append(np.zeros(7, dtype=np.float32))
 
+            if hasattr(sensor_msg, "leftRobotTau"):
+                left_robot_tau_arrays.append(
+                    np.array(sensor_msg.leftRobotTau, dtype=np.float32)
+                )
+            else:
+                left_robot_tau_arrays.append(np.zeros(7, dtype=np.float32))
+
+            if hasattr(sensor_msg, "leftRobotTauExt"):
+                left_robot_tau_ext_arrays.append(
+                    np.array(sensor_msg.leftRobotTauExt, dtype=np.float32)
+                )
+            else:
+                left_robot_tau_ext_arrays.append(np.zeros(7, dtype=np.float32))
+                
+                
             external_img_arrays.append(obs_dict['external_img'])
             left_wrist_img_arrays.append(obs_dict['left_wrist_img'])
 
@@ -230,6 +260,12 @@ if __name__ == '__main__':
     right_robot_tcp_wrench_arrays = np.stack(right_robot_tcp_wrench_arrays, axis=0)
     right_robot_gripper_width_arrays = np.stack(right_robot_gripper_width_arrays, axis=0)
     right_robot_gripper_force_arrays = np.stack(right_robot_gripper_force_arrays, axis=0)
+    
+    # 新增：左臂关节数组
+    left_robot_q_arrays = np.stack(left_robot_q_arrays, axis=0)          # (T, 7)
+    left_robot_tau_arrays = np.stack(left_robot_tau_arrays, axis=0)      # (T, 7)
+    left_robot_tau_ext_arrays = np.stack(left_robot_tau_ext_arrays, axis=0)  # (T, 7)
+
 
     if ACTION_DIM == 4: # (left_tcp_x, left_tcp_y, left_tcp_z, left_gripper_width)
         state_arrays = np.concatenate([left_robot_tcp_pose_arrays[:, :3], left_robot_gripper_width_arrays], axis=-1)
@@ -327,6 +363,11 @@ if __name__ == '__main__':
         right_robot_tcp_wrench_arrays = right_robot_tcp_wrench_arrays[keep_indices]
         right_robot_gripper_width_arrays = right_robot_gripper_width_arrays[keep_indices]
         right_robot_gripper_force_arrays = right_robot_gripper_force_arrays[keep_indices]
+        
+        # 新增：对关节相关量也做同样的下采样
+        left_robot_q_arrays = left_robot_q_arrays[keep_indices]
+        left_robot_tau_arrays = left_robot_tau_arrays[keep_indices]
+        left_robot_tau_ext_arrays = left_robot_tau_ext_arrays[keep_indices]
 
         # Recalculate episode_ends
         new_episode_ends = []
@@ -415,6 +456,34 @@ if __name__ == '__main__':
                                 compressor=compressor)
     zarr_data.create_dataset('left_robot_gripper_force', data=left_robot_gripper_force_arrays, chunks=(10000, 1), dtype='float32', overwrite=True,
                                 compressor=compressor)
+    
+    # 新增：左臂关节相关量
+    zarr_data.create_dataset(
+        'left_robot_q',
+        data=left_robot_q_arrays,
+        chunks=(10000, left_robot_q_arrays.shape[1]),
+        dtype='float32',
+        overwrite=True,
+        compressor=compressor,
+    )
+    zarr_data.create_dataset(
+        'left_robot_tau',
+        data=left_robot_tau_arrays,
+        chunks=(10000, left_robot_tau_arrays.shape[1]),
+        dtype='float32',
+        overwrite=True,
+        compressor=compressor,
+    )
+    zarr_data.create_dataset(
+        'left_robot_tau_ext',
+        data=left_robot_tau_ext_arrays,
+        chunks=(10000, left_robot_tau_ext_arrays.shape[1]),
+        dtype='float32',
+        overwrite=True,
+        compressor=compressor,
+    )
+
+    
     zarr_data.create_dataset('right_robot_tcp_pose', data=right_robot_tcp_pose_arrays, chunks=(10000, 9), dtype='float32', overwrite=True,
                                 compressor=compressor)
     zarr_data.create_dataset('right_robot_tcp_vel', data=right_robot_tcp_vel_arrays, chunks=(10000, 6), dtype='float32', overwrite=True,
