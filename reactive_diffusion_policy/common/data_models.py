@@ -76,6 +76,12 @@ class SensorMessage(BaseModel):
     externalCameraRGB: np.ndarray = Field(default_factory=lambda: np.zeros((48, 64, 3), dtype=np.uint8))  # (H, W, 3) (r, g, b)
     leftWristCameraPointCloud: np.ndarray = Field(default_factory=lambda: np.zeros((10, 6), dtype=np.float16))  # (N, 6) (x, y, z, r, g, b)
     leftWristCameraRGB: np.ndarray = Field(default_factory=lambda: np.zeros((48, 64, 3), dtype=np.uint8))  # (H, W, 3) (r, g, b)
+    
+    # # ⭐ 新增depth：外部 / 腕部 depth
+    # externalCameraDepth: np.ndarray = Field(default_factory=lambda: np.zeros((48, 64), dtype=np.uint16))
+    # leftWristCameraDepth: np.ndarray = Field(default_factory=lambda: np.zeros((48, 64), dtype=np.uint16))
+    # #新增结束
+    
     rightWristCameraPointCloud: np.ndarray = Field(default_factory=lambda: np.zeros((10, 6), dtype=np.float16))  # (N, 6) (x, y, z, r, g, b)
     rightWristCameraRGB: np.ndarray = Field(default_factory=lambda: np.zeros((48, 64, 3), dtype=np.uint8))  # (H, W, 3) (r, g, b)
     leftGripperCameraRGB1: np.ndarray = Field(

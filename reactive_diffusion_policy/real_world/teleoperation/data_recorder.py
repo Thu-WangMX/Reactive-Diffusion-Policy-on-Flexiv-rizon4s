@@ -49,6 +49,7 @@ class DataRecorder(Node):
         depth_camera_rgb_topic_names: List[Optional[str]] = [None, None, None]  # external, left wrist, right wrist
         tactile_camera_rgb_topic_names: List[Optional[str]] = [None, None, None, None]  # left gripper1, left gripper2, right gripper1, right gripper2
         tactile_camera_marker_topic_names: List[Optional[str]] = [None, None, None, None]  # left gripper1, left gripper2, right gripper1, right gripper2
+        #depth_camera_depth_topic_names: List[Optional[str]] = [None, None, None]  # external, left wrist, right wrist新增depth
 
         for topic, msg_type in subs_name_type:
             if "depth/points" in topic:
@@ -58,6 +59,15 @@ class DataRecorder(Node):
                     depth_camera_point_cloud_topic_names[1] = topic
                 elif "right_wrist_camera" in topic:
                     depth_camera_point_cloud_topic_names[2] = topic
+            # #新增depth
+            # elif "depth/image_raw" in topic:
+            #     if "external_camera" in topic:
+            #         depth_camera_depth_topic_names[0] = topic
+            #     elif "left_wrist_camera" in topic:
+            #         depth_camera_depth_topic_names[1] = topic
+            #     elif "right_wrist_camera" in topic:
+            #         depth_camera_depth_topic_names[2] = topic
+            # #新增结束
             elif "color/image_raw" in topic:
                 if "gripper_camera" in topic:
                     if "left_gripper_camera_1" in topic:
@@ -91,10 +101,11 @@ class DataRecorder(Node):
             logger.debug(f"Depth camera rgb topic names: {depth_camera_rgb_topic_names}")
             logger.debug(f"Tactile camera rgb topic names: {tactile_camera_rgb_topic_names}")
             logger.debug(f"Tactile camera marker topic names: {tactile_camera_marker_topic_names}")
-
+            #logger.debug(f"Depth camera depth topic names: {depth_camera_depth_topic_names}")# 新增depth
         self.data_converter = ROS2DataConverter(self.transforms,
                                                 depth_camera_point_cloud_topic_names,
                                                 depth_camera_rgb_topic_names,
+                                                #depth_camera_depth_topic_names,     # 新增depth
                                                 tactile_camera_rgb_topic_names,
                                                 tactile_camera_marker_topic_names,
                                                 tactile_camera_marker_dimension = tactile_camera_marker_dimension,

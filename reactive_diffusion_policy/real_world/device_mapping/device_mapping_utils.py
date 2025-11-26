@@ -12,7 +12,7 @@ def get_topic_and_type(device_to_topic: DeviceToTopic):
     for camera_name, info in device_to_topic.realsense.items():
         logger.debug(f'camera info: {info}')
         subs_name_type.append((f'/{camera_name}/color/image_raw', Image))
-
+        #subs_name_type.append((f'/{camera_name}/depth/image_raw', Image))   # 新增depth
     for camera_name, info in device_to_topic.usb.items():
         subs_name_type.append((f'/{camera_name}/color/image_raw', Image))
         subs_name_type.append((f'/{camera_name}/marker_offset/information', PointCloud2))

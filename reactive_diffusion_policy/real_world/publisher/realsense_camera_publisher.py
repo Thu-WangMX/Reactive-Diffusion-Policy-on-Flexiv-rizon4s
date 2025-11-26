@@ -64,6 +64,8 @@ class RealsenseCameraPublisher(Node):
         self.debug = debug
 
         self.color_publisher_ = self.create_publisher(Image, f'/{camera_name}/color/image_raw', 10)
+        #新增depth
+        #self.depth_publisher_ = self.create_publisher(Image, f'/{camera_name}/depth/image_raw', 10)
         self.timer = self.create_timer(1 / fps, self.timer_callback)
         self.pipeline = None
         self.timestamp_offset = None
@@ -162,6 +164,14 @@ class RealsenseCameraPublisher(Node):
 
         # set the resolution and format of the camera
         config.enable_stream(rs.stream.color, self.rgb_resolution[0], self.rgb_resolution[1], rs.format.bgr8, 30)
+        #新增depth
+        # config.enable_stream(
+        #     rs.stream.depth,
+        #     self.depth_resolution[0],
+        #     self.depth_resolution[1],
+        #     rs.format.z16,
+        #     30
+        #     )
         self.pipeline.start(config)
         logger.debug("Camera started!")
 
@@ -223,6 +233,21 @@ class RealsenseCameraPublisher(Node):
         
         # msg = numpy_to_image(color_image, "bgr8")
         self.color_publisher_.publish(msg)
+        
+    #新增depth
+    def publish_depth_image(self, depth_frame: rs.video_frame, camera_timestamp: Time):
+        depth_image = copy.deepcopy(np.asanyarray(depth_frame.get_data()))  # (H, W), uint16
+
+        msg = Image()
+        msg.header.stamp = self.convert_to_system_timestamp(camera_timestamp).to_msg()
+        msg.header.frame_id = "camera_depth_frame"
+        msg.height, msg.width = depth_image.shape
+        msg.encoding = "16UC1"        # 标准 RealSense depth 编码
+        msg.step = msg.width * 2      # 2 字节 / 像素
+        msg.data = depth_image.tobytes()
+
+        self.depth_publisher_.publish(msg)
+
     
 
     def send_streaming_msg(self, color_image):
@@ -263,9 +288,27 @@ class RealsenseCameraPublisher(Node):
         """
 
         while True:
+            
+            
             # capture frames
             frames = self.pipeline.wait_for_frames()
+            
+            # # 新增depth：对齐 depth 到 color
+            # aligned_frames = self.align.process(frames)
+            
+            # camera_timestamp = self.get_clock().now()
 
+            # color_frame = aligned_frames.get_color_frame()
+            # depth_frame = aligned_frames.get_depth_frame()
+            # if not color_frame or not depth_frame:
+            #     continue
+
+            # # 发布 color
+            # self.publish_color_image(color_frame, camera_timestamp)
+            # # 发布 depth
+            # self.publish_depth_image(depth_frame, camera_timestamp)
+            # #新增结束
+            
             camera_timestamp = self.get_clock().now()
 
             # we only record the raw color frame

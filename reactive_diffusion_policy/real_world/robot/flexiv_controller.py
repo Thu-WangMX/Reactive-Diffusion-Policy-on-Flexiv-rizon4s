@@ -91,6 +91,8 @@ class FlexivController:
                 self.tool = flexivrdk.Tool(self.robot)
                 self.gripper.Enable(gripper_name)
                 
+                self.gripper.Move(0,0.1,20)#新增：初始时闭合夹爪
+                
                 #初始化，在开机时可以先在示教器上手动初始化
                 if gripper_init:
                     self.gripper.Init()

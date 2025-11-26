@@ -20,6 +20,7 @@ class ROS2DataConverter:
                  transforms: RealWorldTransforms,
                  depth_camera_point_cloud_topic_names: List[Optional[str]] = [None, None, None],  # external, left wrist, right wrist
                  depth_camera_rgb_topic_names: List[Optional[str]] = [None, None, None],  # external, left wrist, right wrist
+                 #depth_camera_depth_topic_names: List[Optional[str]] = [None, None, None],  # 新增depth
                  tactile_camera_rgb_topic_names: List[Optional[str]] = [None, None, None, None],  # left gripper1, left gripper2, right gripper1, right gripper2
                  tactile_camera_marker_topic_names: List[Optional[str]] = [None, None, None, None], # left gripper1, left gripper2, right gripper1, right gripper2
                  tactile_camera_marker_dimension: int = 2,
@@ -28,6 +29,7 @@ class ROS2DataConverter:
         self.debug = debug
         self.depth_camera_point_cloud_topic_names = depth_camera_point_cloud_topic_names
         self.depth_camera_rgb_topic_names = depth_camera_rgb_topic_names
+        #self.depth_camera_depth_topic_names = depth_camera_depth_topic_names  # 新增depth
         self.tactile_camera_rgb_topic_names = tactile_camera_rgb_topic_names
         self.tactile_camera_marker_topic_names = tactile_camera_marker_topic_names
         self.bridge = CvBridge()
@@ -144,7 +146,11 @@ class ROS2DataConverter:
         color_image = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
         
         return color_image
-
+    
+    def decode_depth_image(self, msg: Image) -> np.ndarray:
+    # 直接用 CvBridge 转成 np.uint16 (H, W)
+        depth_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding="passthrough")
+        return depth_image
     def decode_rgb_image(self, msg: Image) -> np.ndarray:
         np_arr = np.frombuffer(msg.data, np.uint8)
         color_image = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
@@ -186,7 +192,18 @@ class ROS2DataConverter:
                 rgb_image_list.append(self.decode_depth_rgb_image(topic_dict[topic_name]))
             else:
                 rgb_image_list.append(None)
-
+        # #新增depth
+        # depth_image_list = []
+        # for idx, topic_name in enumerate(self.depth_camera_depth_topic_names):
+        #     if topic_name is not None:
+        #         if self.debug:
+        #             logger.debug(topic_name)
+        #         assert topic_name in topic_dict, f"Topic {topic_name} not found in topic_dict"
+        #         depth_image_list.append(self.decode_depth_image(topic_dict[topic_name]))
+        #     else:
+        #         depth_image_list.append(None)
+        # return point_cloud_list, rgb_image_list,depth_image_list
+        # #新增结束
         return point_cloud_list, rgb_image_list
 
     def convert_tactile_camera(self, topic_dict: Dict) -> \
@@ -243,6 +260,7 @@ class ROS2DataConverter:
          ) = self.convert_robot_states(topic_dict)
         
         
+        #depth_camera_pointcloud_list, depth_camera_rgb_list , depth_camera_depth_list= self.convert_depth_camera(topic_dict)#新增depth
         depth_camera_pointcloud_list, depth_camera_rgb_list = self.convert_depth_camera(topic_dict)
         tactile_camera_rgb_list, tactile_camera_marker_loc_list, tactile_camera_marker_offset_list = self.convert_tactile_camera(topic_dict)
 
@@ -279,6 +297,13 @@ class ROS2DataConverter:
             sensor_msg_args['rightWristCameraPointCloud'] = depth_camera_pointcloud_list[2]
         if depth_camera_rgb_list[2] is not None:
             sensor_msg_args['rightWristCameraRGB'] = depth_camera_rgb_list[2]
+            
+        # #新增depth
+        # if depth_camera_depth_list[0] is not None:
+        #     sensor_msg_args['externalCameraDepth'] = depth_camera_depth_list[0]
+        # if depth_camera_depth_list[1] is not None:
+        #     sensor_msg_args['leftWristCameraDepth'] = depth_camera_depth_list[1]
+        # #新增结束
         
         if tactile_camera_rgb_list[0] is not None:
             sensor_msg_args['leftGripperCameraRGB1'] = tactile_camera_rgb_list[0]

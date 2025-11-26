@@ -35,7 +35,7 @@ def main(args=None):
     # 添加save_file_name作为必选位置参数
     parser.add_argument('save_file_name', type=str, help='File name of the save file (e.g., seq_0002.pkl)')
     # 保留其他可选参数
-    parser.add_argument('--save_file_dir', type=str, default='test1', help='Directory to save the file')
+    parser.add_argument('--save_file_dir', type=str, default='plug_in', help='Directory to save the file')
     parser.add_argument('--save_to_disk', action='store_true', default=True, help='Whether to save data to disk')
     parser.add_argument('--debug', action='store_true', default=False, help='Enable debug messages')
     args = parser.parse_args()

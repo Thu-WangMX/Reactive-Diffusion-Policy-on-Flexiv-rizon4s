@@ -3,7 +3,7 @@ import threading
 # import spdlog
 import flexivrdk
 import math
-# from scipy.spatial.transform import Rotation as R
+from scipy.spatial.transform import Rotation as R
 
 class FlexivRobot:
 

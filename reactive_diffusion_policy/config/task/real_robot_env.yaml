@@ -1,8 +1,6 @@
 robot_name: 'flexiv_rizon'
 robot_server:
-  host_ip: "192.168.2.101" #Zerith-5G
-  
-
+  host_ip: "192.168.2.101" 
   port: 8092
   left_robot_ip: "192.168.2.100" 
   robot_sn: "Rizon4s-062958"

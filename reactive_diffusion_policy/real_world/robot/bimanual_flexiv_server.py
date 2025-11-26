@@ -191,7 +191,9 @@ class BimanualFlexivServer():
 
             robot_gripper = self.left_robot.gripper if robot_side == 'left' else self.right_robot.gripper
             # use force control mode to grasp
-            robot_gripper.Grasp(request.force_limit)
+            #robot_gripper.Grasp(request.force_limit)
+            robot_gripper.Move(0, 0.1, 50)
+            
             return {
                 "message": f"{robot_side.capitalize()} gripper grasp with force limit {request.force_limit}"}
 
