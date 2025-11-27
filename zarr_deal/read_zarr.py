@@ -2,14 +2,22 @@ import zarr
 import numpy as np
 
 # 路径按你的实际情况改
-zarr_path = "/home/wmx/myspace/RDP/data/plug_in_downsample1_zarr/replay_buffer.zarr/data"
+zarr_path = "/home/wmx/myspace/RDP/data/test1_downsample1_zarr/replay_buffer.zarr/data"
 
 # 打开 zarr（只读）
 root = zarr.open(zarr_path, mode="r")
 
 # 看看有哪些字段
 print("Keys in replay_buffer.zarr:")
-print(list(root.array_keys()))
+keys = list(root.array_keys())
+print(keys)
+print()
+
+# 打印每个字段的 shape 和 dtype
+print("==== Array shapes & dtypes ====")
+for k in keys:
+    arr = root[k]
+    print(f"{k:30s} shape: {arr.shape}, dtype: {arr.dtype}")
 print()
 
 # 只取后 N 帧
@@ -19,16 +27,15 @@ N = 1  # 想多看就改大一点
 T = root["timestamp"].shape[0]
 N = min(N, T)
 
-# 读取后 N 帧
+# 读取后 N 帧（这些是你后面逐帧打印里会用到的字段）
 left_wrist_img        = root["left_wrist_img"][-N:]         # (N, H, W, 3)
 external_img          = root["external_img"][-N:]           # (N, H, W, 3)
 left_tcp_pose         = root["left_robot_tcp_pose"][-N:]    # (N, 9)
 left_tcp_wrench       = root["left_robot_tcp_wrench"][-N:]  # (N, 6)
 left_q                = root["left_robot_q"][-N:]           # (N, J)
 left_tau              = root["left_robot_tau"][-N:]         # (N, J)
-gripper_width         = root["left_robot_gripper_width"][-N:] 
-# left_q                = root["left_robot_q"][:N]           # (N, J)
-# left_tau              = root["left_robot_tau"][:N]        # (N, J)
+gripper_width         = root["left_robot_gripper_width"][-N:]
+
 # 打印基本信息
 print(f"left_wrist_img shape: {left_wrist_img.shape}, dtype: {left_wrist_img.dtype}")
 print(f"external_img shape: {external_img.shape}, dtype: {external_img.dtype}")
@@ -42,7 +49,7 @@ print()
 # 为了打印更好看一点，设置 numpy 打印选项
 np.set_printoptions(precision=4, suppress=True, linewidth=120)
 
-# 逐帧打印
+# 逐帧打印（按你的要求，这一段不改动）
 for i in range(N):
     print(f"===== Frame {T - N + i} (index {i} in this slice) =====")
 
