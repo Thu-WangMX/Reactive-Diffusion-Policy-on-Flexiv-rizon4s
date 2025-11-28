@@ -21,7 +21,7 @@ USE_ABSOLUTE_ACTION = True
 
 TAG = 'plug_in' #任务名称
 ACTION_DIM = 10  # (4 + 15)
-TEMPORAL_DOWNSAMPLE_RATIO = 1  # the ratio for temporal down-sampling
+TEMPORAL_DOWNSAMPLE_RATIO = 3  # the ratio for temporal down-sampling
 SENSOR_MODE = 'single_arm_two_realsense_two_tactile'
 GELSIGHT_PCA_PATH = 'data/PCA_Transform_GelSight'
 MCTAC_PCA_PATH = 'data/PCA_Transform_McTAC_v1'
@@ -81,34 +81,36 @@ if __name__ == '__main__':
     timestamp_arrays = []
     external_img_arrays = []
     left_wrist_img_arrays = []
-    right_wrist_img_arrays = []
-    left_gripper1_img_arrays = []
-    left_gripper1_initial_marker_arrays = []
-    left_gripper1_marker_offset_arrays = []
-    left_gripper1_marker_offset_emb_arrays = []
-    left_gripper2_img_arrays = []
-    left_gripper2_initial_marker_arrays = []
-    left_gripper2_marker_offset_arrays = []
-    left_gripper2_marker_offset_emb_arrays = []
-    right_gripper1_img_arrays = []
-    right_gripper1_initial_marker_arrays = []
-    right_gripper1_marker_offset_arrays = []
-    right_gripper1_marker_offset_emb_arrays = []
-    right_gripper2_img_arrays = []
-    right_gripper2_initial_marker_arrays = []
-    right_gripper2_marker_offset_arrays = []
-    right_gripper2_marker_offset_emb_arrays = []
+    #新增：节省内存
+    #right_wrist_img_arrays = []
+    # left_gripper1_img_arrays = []
+    # left_gripper1_initial_marker_arrays = []
+    # left_gripper1_marker_offset_arrays = []
+    # left_gripper1_marker_offset_emb_arrays = []
+    # left_gripper2_img_arrays = []
+    # left_gripper2_initial_marker_arrays = []
+    # left_gripper2_marker_offset_arrays = []
+    # left_gripper2_marker_offset_emb_arrays = []
+    # right_gripper1_img_arrays = []
+    # right_gripper1_initial_marker_arrays = []
+    # right_gripper1_marker_offset_arrays = []
+    # right_gripper1_marker_offset_emb_arrays = []
+    # right_gripper2_img_arrays = []
+    # right_gripper2_initial_marker_arrays = []
+    # right_gripper2_marker_offset_arrays = []
+    # right_gripper2_marker_offset_emb_arrays = []
+    
     # robot state arrays
     left_robot_tcp_pose_arrays = []
     left_robot_tcp_vel_arrays = []
     left_robot_tcp_wrench_arrays = []
     left_robot_gripper_width_arrays = []
-    left_robot_gripper_force_arrays = []
-    right_robot_tcp_pose_arrays = []
-    right_robot_tcp_vel_arrays = []
-    right_robot_tcp_wrench_arrays = []
-    right_robot_gripper_width_arrays = []
-    right_robot_gripper_force_arrays = []
+    # left_robot_gripper_force_arrays = []
+    # right_robot_tcp_pose_arrays = []
+    # right_robot_tcp_vel_arrays = []
+    # right_robot_tcp_wrench_arrays = []
+    # right_robot_gripper_width_arrays = []
+    # right_robot_gripper_force_arrays = []
     
     # 新增：只记录左臂的关节信息
     left_robot_q_arrays = []
@@ -146,12 +148,13 @@ if __name__ == '__main__':
             left_robot_tcp_vel_arrays.append(obs_dict['left_robot_tcp_vel'])
             left_robot_tcp_wrench_arrays.append(obs_dict['left_robot_tcp_wrench'])
             left_robot_gripper_width_arrays.append(obs_dict['left_robot_gripper_width'])
-            left_robot_gripper_force_arrays.append(obs_dict['left_robot_gripper_force'])
-            right_robot_tcp_pose_arrays.append(obs_dict['right_robot_tcp_pose'])
-            right_robot_tcp_vel_arrays.append(obs_dict['right_robot_tcp_vel'])
-            right_robot_tcp_wrench_arrays.append(obs_dict['right_robot_tcp_wrench'])
-            right_robot_gripper_width_arrays.append(obs_dict['right_robot_gripper_width'])
-            right_robot_gripper_force_arrays.append(obs_dict['right_robot_gripper_force'])
+            #新增：节省内存
+            # left_robot_gripper_force_arrays.append(obs_dict['left_robot_gripper_force'])
+            # right_robot_tcp_pose_arrays.append(obs_dict['right_robot_tcp_pose'])
+            # right_robot_tcp_vel_arrays.append(obs_dict['right_robot_tcp_vel'])
+            # right_robot_tcp_wrench_arrays.append(obs_dict['right_robot_tcp_wrench'])
+            # right_robot_gripper_width_arrays.append(obs_dict['right_robot_gripper_width'])
+            # right_robot_gripper_force_arrays.append(obs_dict['right_robot_gripper_force'])
             
             # 新增：从 sensor_msg 里直接取左臂关节量
             # SensorMessage 里字段名是 leftRobotQ / leftRobotTau / leftRobotTauExt
@@ -182,25 +185,26 @@ if __name__ == '__main__':
             left_wrist_img_arrays.append(obs_dict['left_wrist_img'])
 
             if 'two_tactile' in SENSOR_MODE or 'four_tactile' in SENSOR_MODE:
-                left_gripper1_img_arrays.append(obs_dict['left_gripper1_img'])
-                left_gripper2_img_arrays.append(obs_dict['left_gripper2_img'])
-                left_gripper1_initial_marker_arrays.append(obs_dict['left_gripper1_initial_marker'])
-                left_gripper2_initial_marker_arrays.append(obs_dict['left_gripper2_initial_marker'])
-                left_gripper1_marker_offset_arrays.append(obs_dict['left_gripper1_marker_offset'])
-                left_gripper2_marker_offset_arrays.append(obs_dict['left_gripper2_marker_offset'])
-                left_gripper1_marker_offset_emb_arrays.append(obs_dict['left_gripper1_marker_offset_emb'])
-                left_gripper2_marker_offset_emb_arrays.append(obs_dict['left_gripper2_marker_offset_emb'])
-
+                # left_gripper1_img_arrays.append(obs_dict['left_gripper1_img'])
+                # left_gripper2_img_arrays.append(obs_dict['left_gripper2_img'])
+                # left_gripper1_initial_marker_arrays.append(obs_dict['left_gripper1_initial_marker'])
+                # left_gripper2_initial_marker_arrays.append(obs_dict['left_gripper2_initial_marker'])
+                # left_gripper1_marker_offset_arrays.append(obs_dict['left_gripper1_marker_offset'])
+                # left_gripper2_marker_offset_arrays.append(obs_dict['left_gripper2_marker_offset'])
+                # left_gripper1_marker_offset_emb_arrays.append(obs_dict['left_gripper1_marker_offset_emb'])
+                # left_gripper2_marker_offset_emb_arrays.append(obs_dict['left_gripper2_marker_offset_emb'])
+                pass
             if SENSOR_MODE == 'dual_arm_two_realsense_four_tactile':
-                right_wrist_img_arrays.append(obs_dict['right_wrist_img'])
-                right_gripper1_img_arrays.append(obs_dict['right_gripper1_img'])
-                right_gripper2_img_arrays.append(obs_dict['right_gripper2_img'])
-                right_gripper1_initial_marker_arrays.append(obs_dict['right_gripper1_initial_marker'])
-                right_gripper2_initial_marker_arrays.append(obs_dict['right_gripper2_initial_marker'])
-                right_gripper1_marker_offset_arrays.append(obs_dict['right_gripper1_marker_offset'])
-                right_gripper2_marker_offset_arrays.append(obs_dict['right_gripper2_marker_offset'])
-                right_gripper1_marker_offset_emb_arrays.append(obs_dict['right_gripper1_marker_offset_emb'])
-                right_gripper2_marker_offset_emb_arrays.append(obs_dict['right_gripper2_marker_offset_emb'])
+                # right_wrist_img_arrays.append(obs_dict['right_wrist_img'])
+                # right_gripper1_img_arrays.append(obs_dict['right_gripper1_img'])
+                # right_gripper2_img_arrays.append(obs_dict['right_gripper2_img'])
+                # right_gripper1_initial_marker_arrays.append(obs_dict['right_gripper1_initial_marker'])
+                # right_gripper2_initial_marker_arrays.append(obs_dict['right_gripper2_initial_marker'])
+                # right_gripper1_marker_offset_arrays.append(obs_dict['right_gripper1_marker_offset'])
+                # right_gripper2_marker_offset_arrays.append(obs_dict['right_gripper2_marker_offset'])
+                # right_gripper1_marker_offset_emb_arrays.append(obs_dict['right_gripper1_marker_offset_emb'])
+                # right_gripper2_marker_offset_emb_arrays.append(obs_dict['right_gripper2_marker_offset_emb'])
+                pass
 
             if DEBUG:
                 if 'two_tactile' in SENSOR_MODE or 'four_tactile' in SENSOR_MODE:
@@ -228,38 +232,39 @@ if __name__ == '__main__':
     external_img_arrays = np.stack(external_img_arrays, axis=0)
     left_wrist_img_arrays = np.stack(left_wrist_img_arrays, axis=0)
     if 'two_tactile' in SENSOR_MODE or 'four_tactile' in SENSOR_MODE:
-        left_gripper1_img_arrays = np.stack(left_gripper1_img_arrays, axis=0)
-        left_gripper2_img_arrays = np.stack(left_gripper2_img_arrays, axis=0)
-        left_gripper1_initial_marker_arrays = np.stack(left_gripper1_initial_marker_arrays, axis=0)
-        left_gripper2_initial_marker_arrays = np.stack(left_gripper2_initial_marker_arrays, axis=0)
-        left_gripper1_marker_offset_arrays = np.stack(left_gripper1_marker_offset_arrays, axis=0)
-        left_gripper2_marker_offset_arrays = np.stack(left_gripper2_marker_offset_arrays, axis=0)
-        left_gripper1_marker_offset_emb_arrays = np.stack(left_gripper1_marker_offset_emb_arrays, axis=0)
-        left_gripper2_marker_offset_emb_arrays = np.stack(left_gripper2_marker_offset_emb_arrays, axis=0)
+        # left_gripper1_img_arrays = np.stack(left_gripper1_img_arrays, axis=0)
+        # left_gripper2_img_arrays = np.stack(left_gripper2_img_arrays, axis=0)
+        # left_gripper1_initial_marker_arrays = np.stack(left_gripper1_initial_marker_arrays, axis=0)
+        # left_gripper2_initial_marker_arrays = np.stack(left_gripper2_initial_marker_arrays, axis=0)
+        # left_gripper1_marker_offset_arrays = np.stack(left_gripper1_marker_offset_arrays, axis=0)
+        # left_gripper2_marker_offset_arrays = np.stack(left_gripper2_marker_offset_arrays, axis=0)
+        # left_gripper1_marker_offset_emb_arrays = np.stack(left_gripper1_marker_offset_emb_arrays, axis=0)
+        # left_gripper2_marker_offset_emb_arrays = np.stack(left_gripper2_marker_offset_emb_arrays, axis=0)
+        pass
 
     episode_ends_arrays = np.array(episode_ends_arrays)
-    if SENSOR_MODE == 'dual_arm_two_realsense_four_tactile':
-        right_gripper1_img_arrays = np.stack(right_gripper1_img_arrays, axis=0)
-        right_gripper2_img_arrays = np.stack(right_gripper2_img_arrays, axis=0)
-        right_gripper1_initial_marker_arrays = np.stack(right_gripper1_initial_marker_arrays, axis=0)
-        right_gripper2_initial_marker_arrays = np.stack(right_gripper2_initial_marker_arrays, axis=0)
-        right_gripper1_marker_offset_arrays = np.stack(right_gripper1_marker_offset_arrays, axis=0)
-        right_gripper2_marker_offset_arrays = np.stack(right_gripper2_marker_offset_arrays, axis=0)
-        right_gripper1_marker_offset_emb_arrays = np.stack(right_gripper1_marker_offset_emb_arrays, axis=0)
-        right_gripper2_marker_offset_emb_arrays = np.stack(right_gripper2_marker_offset_emb_arrays, axis=0)
-        right_wrist_img_arrays = np.stack(right_wrist_img_arrays, axis=0)
+    # if SENSOR_MODE == 'dual_arm_two_realsense_four_tactile':
+    #     right_gripper1_img_arrays = np.stack(right_gripper1_img_arrays, axis=0)
+    #     right_gripper2_img_arrays = np.stack(right_gripper2_img_arrays, axis=0)
+    #     right_gripper1_initial_marker_arrays = np.stack(right_gripper1_initial_marker_arrays, axis=0)
+    #     right_gripper2_initial_marker_arrays = np.stack(right_gripper2_initial_marker_arrays, axis=0)
+    #     right_gripper1_marker_offset_arrays = np.stack(right_gripper1_marker_offset_arrays, axis=0)
+    #     right_gripper2_marker_offset_arrays = np.stack(right_gripper2_marker_offset_arrays, axis=0)
+    #     right_gripper1_marker_offset_emb_arrays = np.stack(right_gripper1_marker_offset_emb_arrays, axis=0)
+    #     right_gripper2_marker_offset_emb_arrays = np.stack(right_gripper2_marker_offset_emb_arrays, axis=0)
+    #     right_wrist_img_arrays = np.stack(right_wrist_img_arrays, axis=0)
 
     timestamp_arrays = np.array(timestamp_arrays)
     left_robot_tcp_pose_arrays = np.stack(left_robot_tcp_pose_arrays, axis=0)
     left_robot_tcp_vel_arrays = np.stack(left_robot_tcp_vel_arrays, axis=0)
     left_robot_tcp_wrench_arrays = np.stack(left_robot_tcp_wrench_arrays, axis=0)
     left_robot_gripper_width_arrays = np.stack(left_robot_gripper_width_arrays, axis=0)
-    left_robot_gripper_force_arrays = np.stack(left_robot_gripper_force_arrays, axis=0)
-    right_robot_tcp_pose_arrays = np.stack(right_robot_tcp_pose_arrays, axis=0)
-    right_robot_tcp_vel_arrays = np.stack(right_robot_tcp_vel_arrays, axis=0)
-    right_robot_tcp_wrench_arrays = np.stack(right_robot_tcp_wrench_arrays, axis=0)
-    right_robot_gripper_width_arrays = np.stack(right_robot_gripper_width_arrays, axis=0)
-    right_robot_gripper_force_arrays = np.stack(right_robot_gripper_force_arrays, axis=0)
+    # left_robot_gripper_force_arrays = np.stack(left_robot_gripper_force_arrays, axis=0)
+    # right_robot_tcp_pose_arrays = np.stack(right_robot_tcp_pose_arrays, axis=0)
+    # right_robot_tcp_vel_arrays = np.stack(right_robot_tcp_vel_arrays, axis=0)
+    # right_robot_tcp_wrench_arrays = np.stack(right_robot_tcp_wrench_arrays, axis=0)
+    # right_robot_gripper_width_arrays = np.stack(right_robot_gripper_width_arrays, axis=0)
+    # right_robot_gripper_force_arrays = np.stack(right_robot_gripper_force_arrays, axis=0)
     
     # 新增：左臂关节数组
     left_robot_q_arrays = np.stack(left_robot_q_arrays, axis=0)          # (T, 7)
@@ -333,36 +338,38 @@ if __name__ == '__main__':
         left_wrist_img_arrays = left_wrist_img_arrays[keep_indices]
 
         if 'two_tactile' in SENSOR_MODE or 'four_tactile' in SENSOR_MODE:
-            left_gripper1_img_arrays = left_gripper1_img_arrays[keep_indices]
-            left_gripper2_img_arrays = left_gripper2_img_arrays[keep_indices]
-            left_gripper1_initial_marker_arrays = left_gripper1_initial_marker_arrays[keep_indices]
-            left_gripper2_initial_marker_arrays = left_gripper2_initial_marker_arrays[keep_indices]
-            left_gripper1_marker_offset_arrays = left_gripper1_marker_offset_arrays[keep_indices]
-            left_gripper2_marker_offset_arrays = left_gripper2_marker_offset_arrays[keep_indices]
-            left_gripper1_marker_offset_emb_arrays = left_gripper1_marker_offset_emb_arrays[keep_indices]
-            left_gripper2_marker_offset_emb_arrays = left_gripper2_marker_offset_emb_arrays[keep_indices]
+            # left_gripper1_img_arrays = left_gripper1_img_arrays[keep_indices]
+            # left_gripper2_img_arrays = left_gripper2_img_arrays[keep_indices]
+            # left_gripper1_initial_marker_arrays = left_gripper1_initial_marker_arrays[keep_indices]
+            # left_gripper2_initial_marker_arrays = left_gripper2_initial_marker_arrays[keep_indices]
+            # left_gripper1_marker_offset_arrays = left_gripper1_marker_offset_arrays[keep_indices]
+            # left_gripper2_marker_offset_arrays = left_gripper2_marker_offset_arrays[keep_indices]
+            # left_gripper1_marker_offset_emb_arrays = left_gripper1_marker_offset_emb_arrays[keep_indices]
+            # left_gripper2_marker_offset_emb_arrays = left_gripper2_marker_offset_emb_arrays[keep_indices]
+            pass
 
         if SENSOR_MODE == 'dual_arm_two_realsense_four_tactile':
-            right_wrist_img_arrays = right_wrist_img_arrays[keep_indices]
-            right_gripper1_img_arrays = right_gripper1_img_arrays[keep_indices]
-            right_gripper2_img_arrays = right_gripper2_img_arrays[keep_indices]
-            right_gripper1_initial_marker_arrays = right_gripper1_initial_marker_arrays[keep_indices]
-            right_gripper2_initial_marker_arrays = right_gripper2_initial_marker_arrays[keep_indices]
-            right_gripper1_marker_offset_arrays = right_gripper1_marker_offset_arrays[keep_indices]
-            right_gripper2_marker_offset_arrays = right_gripper2_marker_offset_arrays[keep_indices]
-            right_gripper1_marker_offset_emb_arrays = right_gripper1_marker_offset_emb_arrays[keep_indices]
-            right_gripper2_marker_offset_emb_arrays = right_gripper2_marker_offset_emb_arrays[keep_indices]
-
+            # right_wrist_img_arrays = right_wrist_img_arrays[keep_indices]
+            # right_gripper1_img_arrays = right_gripper1_img_arrays[keep_indices]
+            # right_gripper2_img_arrays = right_gripper2_img_arrays[keep_indices]
+            # right_gripper1_initial_marker_arrays = right_gripper1_initial_marker_arrays[keep_indices]
+            # right_gripper2_initial_marker_arrays = right_gripper2_initial_marker_arrays[keep_indices]
+            # right_gripper1_marker_offset_arrays = right_gripper1_marker_offset_arrays[keep_indices]
+            # right_gripper2_marker_offset_arrays = right_gripper2_marker_offset_arrays[keep_indices]
+            # right_gripper1_marker_offset_emb_arrays = right_gripper1_marker_offset_emb_arrays[keep_indices]
+            # right_gripper2_marker_offset_emb_arrays = right_gripper2_marker_offset_emb_arrays[keep_indices]
+            pass
+        
         left_robot_tcp_pose_arrays = left_robot_tcp_pose_arrays[keep_indices]
         left_robot_tcp_vel_arrays = left_robot_tcp_vel_arrays[keep_indices]
         left_robot_tcp_wrench_arrays = left_robot_tcp_wrench_arrays[keep_indices]
         left_robot_gripper_width_arrays = left_robot_gripper_width_arrays[keep_indices]
-        left_robot_gripper_force_arrays = left_robot_gripper_force_arrays[keep_indices]
-        right_robot_tcp_pose_arrays = right_robot_tcp_pose_arrays[keep_indices]
-        right_robot_tcp_vel_arrays = right_robot_tcp_vel_arrays[keep_indices]
-        right_robot_tcp_wrench_arrays = right_robot_tcp_wrench_arrays[keep_indices]
-        right_robot_gripper_width_arrays = right_robot_gripper_width_arrays[keep_indices]
-        right_robot_gripper_force_arrays = right_robot_gripper_force_arrays[keep_indices]
+        #left_robot_gripper_force_arrays = left_robot_gripper_force_arrays[keep_indices]
+        # right_robot_tcp_pose_arrays = right_robot_tcp_pose_arrays[keep_indices]
+        # right_robot_tcp_vel_arrays = right_robot_tcp_vel_arrays[keep_indices]
+        # right_robot_tcp_wrench_arrays = right_robot_tcp_wrench_arrays[keep_indices]
+        # right_robot_gripper_width_arrays = right_robot_gripper_width_arrays[keep_indices]
+        # right_robot_gripper_force_arrays = right_robot_gripper_force_arrays[keep_indices]
         
         # 新增：对关节相关量也做同样的下采样
         left_robot_q_arrays = left_robot_q_arrays[keep_indices]
@@ -391,14 +398,14 @@ if __name__ == '__main__':
         # left_robot_tcp_pose_col = -left_robot_tcp_pose_arrays[:125, 2]
         # left_gripper2_marker_offset_emb_col = left_gripper2_marker_offset_emb_arrays[:125, 2]
         left_robot_tcp_pose_col = -left_robot_tcp_pose_arrays[3000:3200, 2]
-        left_gripper2_marker_offset_emb_col = left_gripper2_marker_offset_emb_arrays[3000:3200, 2]
+        #left_gripper2_marker_offset_emb_col = left_gripper2_marker_offset_emb_arrays[3000:3200, 2]
 
         # Normalize the columns to range 0-1
         left_robot_tcp_pose_col_norm = (left_robot_tcp_pose_col - np.min(left_robot_tcp_pose_col)) / (
                     np.max(left_robot_tcp_pose_col) - np.min(left_robot_tcp_pose_col))
-        left_gripper2_marker_offset_emb_col_norm = (left_gripper2_marker_offset_emb_col - np.min(
-            left_gripper2_marker_offset_emb_col)) / (np.max(left_gripper2_marker_offset_emb_col) - np.min(
-            left_gripper2_marker_offset_emb_col))
+        # left_gripper2_marker_offset_emb_col_norm = (left_gripper2_marker_offset_emb_col - np.min(
+        #     left_gripper2_marker_offset_emb_col)) / (np.max(left_gripper2_marker_offset_emb_col) - np.min(
+        #     left_gripper2_marker_offset_emb_col))
 
         # Shift the indices of left_robot_tcp_pose_col_norm by K
         K = 3
@@ -407,7 +414,7 @@ if __name__ == '__main__':
         # Plot the normalized columns
         plt.figure(figsize=(10, 6))
         plt.plot(left_robot_tcp_pose_col_norm, label='Left Robot TCP Pose (Normalized)')
-        plt.plot(left_gripper2_marker_offset_emb_col_norm, label='Left Gripper2 Marker Offset Emb (Normalized)')
+        #plt.plot(left_gripper2_marker_offset_emb_col_norm, label='Left Gripper2 Marker Offset Emb (Normalized)')
         plt.plot(shifted_left_robot_tcp_pose_col_norm, label=f'Left Robot TCP Pose (Shifted by {K} frame)')
         plt.xlabel('Index')
         plt.ylabel('Normalized Value')
@@ -454,8 +461,8 @@ if __name__ == '__main__':
                                 compressor=compressor)
     zarr_data.create_dataset('left_robot_gripper_width', data=left_robot_gripper_width_arrays, chunks=(10000, 1), dtype='float32', overwrite=True,
                                 compressor=compressor)
-    zarr_data.create_dataset('left_robot_gripper_force', data=left_robot_gripper_force_arrays, chunks=(10000, 1), dtype='float32', overwrite=True,
-                                compressor=compressor)
+    # zarr_data.create_dataset('left_robot_gripper_force', data=left_robot_gripper_force_arrays, chunks=(10000, 1), dtype='float32', overwrite=True,
+    #                             compressor=compressor)
     
     # 新增：左臂关节相关量
     zarr_data.create_dataset(
@@ -484,16 +491,16 @@ if __name__ == '__main__':
     )
 
     
-    zarr_data.create_dataset('right_robot_tcp_pose', data=right_robot_tcp_pose_arrays, chunks=(10000, 9), dtype='float32', overwrite=True,
-                                compressor=compressor)
-    zarr_data.create_dataset('right_robot_tcp_vel', data=right_robot_tcp_vel_arrays, chunks=(10000, 6), dtype='float32', overwrite=True,
-                                compressor=compressor)
-    zarr_data.create_dataset('right_robot_tcp_wrench', data=right_robot_tcp_wrench_arrays, chunks=(10000, 6), dtype='float32', overwrite=True,
-                                compressor=compressor)
-    zarr_data.create_dataset('right_robot_gripper_width', data=right_robot_gripper_width_arrays, chunks=(10000, 1), dtype='float32', overwrite=True,
-                                compressor=compressor)
-    zarr_data.create_dataset('right_robot_gripper_force', data=right_robot_gripper_force_arrays, chunks=(10000, 1), dtype='float32', overwrite=True,
-                                compressor=compressor)
+    # zarr_data.create_dataset('right_robot_tcp_pose', data=right_robot_tcp_pose_arrays, chunks=(10000, 9), dtype='float32', overwrite=True,
+    #                             compressor=compressor)
+    # zarr_data.create_dataset('right_robot_tcp_vel', data=right_robot_tcp_vel_arrays, chunks=(10000, 6), dtype='float32', overwrite=True,
+    #                             compressor=compressor)
+    # zarr_data.create_dataset('right_robot_tcp_wrench', data=right_robot_tcp_wrench_arrays, chunks=(10000, 6), dtype='float32', overwrite=True,
+    #                             compressor=compressor)
+    # zarr_data.create_dataset('right_robot_gripper_width', data=right_robot_gripper_width_arrays, chunks=(10000, 1), dtype='float32', overwrite=True,
+    #                             compressor=compressor)
+    # zarr_data.create_dataset('right_robot_gripper_force', data=right_robot_gripper_force_arrays, chunks=(10000, 1), dtype='float32', overwrite=True,
+    #                             compressor=compressor)
 
     zarr_data.create_dataset('target', data=state_arrays, chunks=action_chunk_size, dtype='float32', overwrite=True,
                              compressor=compressor)
@@ -505,39 +512,39 @@ if __name__ == '__main__':
     zarr_data.create_dataset('external_img', data=external_img_arrays, chunks=external_img_chunk_size, dtype='uint8', overwrite=True,
                              compressor=compressor)
     zarr_data.create_dataset('left_wrist_img', data=left_wrist_img_arrays, chunks=wrist_img_chunk_size, dtype='uint8')
-    if 'two_tactile' in SENSOR_MODE or 'four_tactile' in SENSOR_MODE:
-        gripper_img_chunk_size = (
-            100, left_gripper1_img_arrays.shape[1], left_gripper1_img_arrays.shape[2], left_gripper1_img_arrays.shape[3])
-        zarr_data.create_dataset('left_gripper1_img', data=left_gripper1_img_arrays, chunks=gripper_img_chunk_size, dtype='uint8')
-        zarr_data.create_dataset('left_gripper2_img', data=left_gripper2_img_arrays, chunks=gripper_img_chunk_size, dtype='uint8')
+    # if 'two_tactile' in SENSOR_MODE or 'four_tactile' in SENSOR_MODE:
+    #     gripper_img_chunk_size = (
+    #         100, left_gripper1_img_arrays.shape[1], left_gripper1_img_arrays.shape[2], left_gripper1_img_arrays.shape[3])
+    #     zarr_data.create_dataset('left_gripper1_img', data=left_gripper1_img_arrays, chunks=gripper_img_chunk_size, dtype='uint8')
+    #     zarr_data.create_dataset('left_gripper2_img', data=left_gripper2_img_arrays, chunks=gripper_img_chunk_size, dtype='uint8')
 
-        marker_chunk_size = (10000, left_gripper1_initial_marker_arrays.shape[1], left_gripper1_initial_marker_arrays.shape[2])
-        marker_emb_chunk_size = (10000, left_gripper2_marker_offset_emb_arrays.shape[1])
-        zarr_data.create_dataset('left_gripper1_initial_marker', data=left_gripper1_initial_marker_arrays, chunks=marker_chunk_size, dtype='float32')
-        zarr_data.create_dataset('left_gripper2_initial_marker', data=left_gripper2_initial_marker_arrays, chunks=marker_chunk_size, dtype='float32')
-        zarr_data.create_dataset('left_gripper1_marker_offset', data=left_gripper1_marker_offset_arrays, chunks=marker_chunk_size, dtype='float32')
-        zarr_data.create_dataset('left_gripper2_marker_offset', data=left_gripper2_marker_offset_arrays, chunks=marker_chunk_size, dtype='float32')
-        zarr_data.create_dataset('left_gripper1_marker_offset_emb', data=left_gripper1_marker_offset_emb_arrays, chunks=marker_emb_chunk_size, dtype='float32')
-        zarr_data.create_dataset('left_gripper2_marker_offset_emb', data=left_gripper2_marker_offset_emb_arrays, chunks=marker_emb_chunk_size, dtype='float32')
-        if SENSOR_MODE == 'dual_arm_two_realsense_four_tactile':
-            zarr_data.create_dataset('right_wrist_img', data=right_wrist_img_arrays, chunks=wrist_img_chunk_size,
-                                     dtype='uint8', overwrite=True)
-            zarr_data.create_dataset('right_gripper1_img', data=right_gripper1_img_arrays, chunks=gripper_img_chunk_size,
-                                     dtype='uint8', overwrite=True)
-            zarr_data.create_dataset('right_gripper2_img', data=right_gripper2_img_arrays, chunks=gripper_img_chunk_size,
-                                     dtype='uint8', overwrite=True)
-            zarr_data.create_dataset('right_gripper1_initial_marker', data=right_gripper1_initial_marker_arrays,
-                                     chunks=marker_chunk_size, dtype='float32', overwrite=True)
-            zarr_data.create_dataset('right_gripper2_initial_marker', data=right_gripper2_initial_marker_arrays,
-                                     chunks=marker_chunk_size, dtype='float32', overwrite=True)
-            zarr_data.create_dataset('right_gripper1_marker_offset', data=right_gripper1_marker_offset_arrays,
-                                     chunks=marker_chunk_size, dtype='float32', overwrite=True)
-            zarr_data.create_dataset('right_gripper2_marker_offset', data=right_gripper2_marker_offset_arrays,
-                                     chunks=marker_chunk_size, dtype='float32', overwrite=True)
-            zarr_data.create_dataset('right_gripper1_marker_offset_emb', data=right_gripper1_marker_offset_emb_arrays,
-                                     chunks=marker_emb_chunk_size, dtype='float32', overwrite=True)
-            zarr_data.create_dataset('right_gripper2_marker_offset_emb', data=right_gripper2_marker_offset_emb_arrays,
-                                     chunks=marker_emb_chunk_size, dtype='float32', overwrite=True)
+    #     marker_chunk_size = (10000, left_gripper1_initial_marker_arrays.shape[1], left_gripper1_initial_marker_arrays.shape[2])
+    #     marker_emb_chunk_size = (10000, left_gripper2_marker_offset_emb_arrays.shape[1])
+    #     zarr_data.create_dataset('left_gripper1_initial_marker', data=left_gripper1_initial_marker_arrays, chunks=marker_chunk_size, dtype='float32')
+    #     zarr_data.create_dataset('left_gripper2_initial_marker', data=left_gripper2_initial_marker_arrays, chunks=marker_chunk_size, dtype='float32')
+    #     zarr_data.create_dataset('left_gripper1_marker_offset', data=left_gripper1_marker_offset_arrays, chunks=marker_chunk_size, dtype='float32')
+    #     zarr_data.create_dataset('left_gripper2_marker_offset', data=left_gripper2_marker_offset_arrays, chunks=marker_chunk_size, dtype='float32')
+    #     zarr_data.create_dataset('left_gripper1_marker_offset_emb', data=left_gripper1_marker_offset_emb_arrays, chunks=marker_emb_chunk_size, dtype='float32')
+    #     zarr_data.create_dataset('left_gripper2_marker_offset_emb', data=left_gripper2_marker_offset_emb_arrays, chunks=marker_emb_chunk_size, dtype='float32')
+    #     if SENSOR_MODE == 'dual_arm_two_realsense_four_tactile':
+    #         zarr_data.create_dataset('right_wrist_img', data=right_wrist_img_arrays, chunks=wrist_img_chunk_size,
+    #                                  dtype='uint8', overwrite=True)
+    #         zarr_data.create_dataset('right_gripper1_img', data=right_gripper1_img_arrays, chunks=gripper_img_chunk_size,
+    #                                  dtype='uint8', overwrite=True)
+    #         zarr_data.create_dataset('right_gripper2_img', data=right_gripper2_img_arrays, chunks=gripper_img_chunk_size,
+    #                                  dtype='uint8', overwrite=True)
+    #         zarr_data.create_dataset('right_gripper1_initial_marker', data=right_gripper1_initial_marker_arrays,
+    #                                  chunks=marker_chunk_size, dtype='float32', overwrite=True)
+    #         zarr_data.create_dataset('right_gripper2_initial_marker', data=right_gripper2_initial_marker_arrays,
+    #                                  chunks=marker_chunk_size, dtype='float32', overwrite=True)
+    #         zarr_data.create_dataset('right_gripper1_marker_offset', data=right_gripper1_marker_offset_arrays,
+    #                                  chunks=marker_chunk_size, dtype='float32', overwrite=True)
+    #         zarr_data.create_dataset('right_gripper2_marker_offset', data=right_gripper2_marker_offset_arrays,
+    #                                  chunks=marker_chunk_size, dtype='float32', overwrite=True)
+    #         zarr_data.create_dataset('right_gripper1_marker_offset_emb', data=right_gripper1_marker_offset_emb_arrays,
+    #                                  chunks=marker_emb_chunk_size, dtype='float32', overwrite=True)
+    #         zarr_data.create_dataset('right_gripper2_marker_offset_emb', data=right_gripper2_marker_offset_emb_arrays,
+    #                                  chunks=marker_emb_chunk_size, dtype='float32', overwrite=True)
 
     # print zarr data structure
     logger.info('Zarr data structure')

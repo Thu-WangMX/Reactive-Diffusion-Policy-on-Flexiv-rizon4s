@@ -2,7 +2,7 @@ import zarr
 import numpy as np
 
 # 路径按你的实际情况改
-zarr_path = "/home/wmx/myspace/RDP/data/test1_downsample1_zarr/replay_buffer.zarr/data"
+zarr_path = "/home/wmx/myspace/RDP/data/plug_in_stream_downsample1_zarr/replay_buffer.zarr/data"
 
 # 打开 zarr（只读）
 root = zarr.open(zarr_path, mode="r")
@@ -21,7 +21,7 @@ for k in keys:
 print()
 
 # 只取后 N 帧
-N = 1  # 想多看就改大一点
+N = 3  # 想多看就改大一点
 
 # 安全起见，防止 N > 总长度
 T = root["timestamp"].shape[0]
@@ -34,8 +34,11 @@ left_tcp_pose         = root["left_robot_tcp_pose"][-N:]    # (N, 9)
 left_tcp_wrench       = root["left_robot_tcp_wrench"][-N:]  # (N, 6)
 left_q                = root["left_robot_q"][-N:]           # (N, J)
 left_tau              = root["left_robot_tau"][-N:]         # (N, J)
-gripper_width         = root["left_robot_gripper_width"][-N:]
+gripper_width         = root["left_robot_gripper_width"][:N] #[:N]
 
+# right_robot_tcp_pose = root ["right_robot_tcp_pose"][:N]
+# left_gripper2_marker_offset_emb = root ["left_gripper2_marker_offset_emb"][:N] #全为0
+# left_robot_gripper_force = root ["left_robot_gripper_force"][:N]
 # 打印基本信息
 print(f"left_wrist_img shape: {left_wrist_img.shape}, dtype: {left_wrist_img.dtype}")
 print(f"external_img shape: {external_img.shape}, dtype: {external_img.dtype}")
@@ -59,7 +62,9 @@ for i in range(N):
     print("left_robot_q:", left_q[i])
     print("left_robot_tau:", left_tau[i])
     print("gripper_width:", gripper_width [i])
-
+#     print("right_robot_tcp_pose:", right_robot_tcp_pose [i])
+#     print("left_gripper2_marker_offset_emb",left_gripper2_marker_offset_emb[i])
+#     print("left_robot_gripper_force",left_robot_gripper_force[i])
     # 图像打印统计信息
     wrist = left_wrist_img[i]
     ext   = external_img[i]

@@ -17,7 +17,7 @@ try:
     print("✓ 机器人初始化完成并进入PRIMITIVE模式。")
 
 
-    position = [0.5000 ,-0.0269 , 0.30]
+    position = [0.5300 ,-0.0269 , 0.30]
     euler_degrees = [-179.1952  ,  0.2877   ,-178.6688]
     robot.MoveL(position,euler_degrees, speed=0.1, acc=0.1)
 except Exception as e:

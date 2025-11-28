@@ -40,9 +40,9 @@ class BimanualFlexivServer():
             self.right_robot = None
 
         # open the gripper
-        print(555555555555556)
-        self.left_robot.gripper.Move(0.1, 0.1, 10)
-        print(555555555555555)
+
+        #self.left_robot.gripper.Move(0.1, 0.1, 10) #新增：程序开始时不松开夹爪
+   
         if self.bimanual_teleop:    
             self.right_robot.gripper.Move(0.1, 0.1, 10)
 

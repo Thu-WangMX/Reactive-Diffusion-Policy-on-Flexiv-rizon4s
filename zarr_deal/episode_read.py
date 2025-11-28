@@ -1,7 +1,7 @@
 import zarr
 import numpy as np
 
-zarr_path = "/home/wmx/myspace/RDP/data/test1_downsample0_zarr/replay_buffer.zarr"
+zarr_path = "/home/wmx/myspace/RDP/data/plug_in_stream_downsample1_zarr/replay_buffer.zarr"
 
 # 打开 zarr 根
 root = zarr.open(zarr_path, mode="r")
@@ -16,5 +16,5 @@ print("episode_ends shape:", episode_ends.shape, "dtype:", episode_ends.dtype)
 episode_ends_np = np.array(episode_ends)
 print("episode_ends:", episode_ends_np)
 
-# 如果只想看前几个：
-print("first 20 episode_ends:", episode_ends_np[:20])
+# # 如果只想看前几个：
+# print("first 20 episode_ends:", episode_ends_np[:50])

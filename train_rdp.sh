@@ -47,7 +47,7 @@
 GPU_ID=0
 
 # ==== 你以后只改这几行 ====
-DATASET_PATH="/home/wmx/myspace/RDP/data/plug_in_downsample1_zarr"
+DATASET_PATH="/home/wmx/myspace/RDP/data/plug_in_stream_downsample1_zarr"
 AT_TASK="wmx_real_plugin_image_wrench_at_24fps"
 LDP_TASK="wmx_real_plugin_two_cam_image_wrench_ldp_24fps"
 AT_CONFIG="at_peel"
