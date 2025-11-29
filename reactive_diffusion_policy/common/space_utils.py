@@ -1,9 +1,35 @@
 import numpy as np
 from typing import Tuple, Union
 import transforms3d as t3d
-from geometry_msgs.msg import Pose
+#from geometry_msgs.msg import Pose
 import scipy.spatial.transform as st
+try:
+    from geometry_msgs.msg import Pose  # 本地有 ROS 的情况
+except ImportError:
+    from dataclasses import dataclass
+    @dataclass
+    class Position:
+        x: float = 0.0
+        y: float = 0.0
+        z: float = 0.0
 
+    @dataclass
+    class Orientation:
+        x: float = 0.0
+        y: float = 0.0
+        z: float = 0.0
+        w: float = 1.0
+
+    @dataclass
+    class Pose:
+        """Minimal stub of geometry_msgs.msg.Pose for non-ROS training.
+
+        只用于让导入正常、类型检查通过；在纯离线训练环境里，
+        一般不会真的构造 ROS 的 Pose 对象。
+        """
+        position: Position = Position()
+        orientation: Orientation = Orientation()
+        
 def ros_pose_to_4x4matrix(pose: Pose) -> np.ndarray:
     # Convert ROS Pose message to 4x4 transformation matrix
     mat = np.eye(4)

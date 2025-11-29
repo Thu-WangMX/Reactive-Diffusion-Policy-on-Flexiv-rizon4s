@@ -47,7 +47,7 @@
 GPU_ID=0
 
 # ==== 你以后只改这几行 ====
-DATASET_PATH="/home/wmx/myspace/RDP/data/plug_in_stream_downsample1_zarr"
+DATASET_PATH="/root/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/dataset/plug_in_stream_downsample1_zarr"
 AT_TASK="wmx_real_plugin_image_wrench_at_24fps"
 LDP_TASK="wmx_real_plugin_two_cam_image_wrench_ldp_24fps"
 AT_CONFIG="at_peel"
@@ -66,11 +66,12 @@ SEARCH_PATH="./data/outputs"
 #     at=${AT_CONFIG} \
 #     logging.mode=${LOGGING_MODE}
 
-# 找刚训练好的 AT checkpoint
+# # 找刚训练好的 AT checkpoint
 # AT_LOAD_DIR=$(find "${SEARCH_PATH}" -maxdepth 2 -path "*${TIMESTAMP}*" -type d)/checkpoints/latest.ckpt
 
 
-AT_LOAD_DIR="./data/outputs/2025.11.29/08.01.50_train_vae_wmx_real_plugin_image_wrench_at_24fps_1129080148/checkpoints/latest.ckpt"
+AT_LOAD_DIR="./data/outputs/2025.11.29/19.14.55_train_vae_wmx_real_plugin_image_wrench_at_24fps_1129191454/checkpoints/latest.ckpt"
+
 # Stage 2: 训练 LDP/RDP
 CUDA_VISIBLE_DEVICES=${GPU_ID} accelerate launch train.py \
     --config-name=train_latent_diffusion_unet_real_image_workspace \

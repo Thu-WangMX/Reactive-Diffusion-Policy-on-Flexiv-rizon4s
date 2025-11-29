@@ -176,7 +176,7 @@ optimizer:
   encoder_weight_decay: 1.0e-6
 
 training:
-  device: "cuda:0"
+  device: "cuda"
   seed: 42
   debug: False
   resume: True

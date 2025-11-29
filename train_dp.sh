@@ -9,17 +9,19 @@
 
 #!/bin/bash
 
-GPU_ID=0
+GPU_ID=1
 
 # ==== 以后只改这两行 ====
-DATASET_PATH="/home/wmx/myspace/RDP/data/plug_in_downsample1_zarr"
+#DATASET_PATH="/home/wmx/myspace/RDP/data/plug_in_downsample1_zarr"
+DATASET_PATH="/root/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/dataset/plug_in_stream_downsample1_zarr"
 DP_TASK="wmx_real_image_dp_absolute_12fps"
 # ========================
 
 LOGGING_MODE="online"
 TIMESTAMP=$(date +%m%d%H%M%S)
 
-CUDA_VISIBLE_DEVICES=${GPU_ID} accelerate launch train.py \
+#CUDA_VISIBLE_DEVICES=${GPU_ID} accelerate launch train.py \
+accelerate launch --gpu_ids ${GPU_ID} train.py \
     --config-name=train_diffusion_unet_real_image_workspace \
     task=${DP_TASK} \
     task.dataset_path=${DATASET_PATH} \
