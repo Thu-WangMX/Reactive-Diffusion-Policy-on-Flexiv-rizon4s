@@ -25,7 +25,27 @@ shape_meta: &shape_meta
       type: low_dim
   action:
     shape: [10] # (3+6+1) (x, y, z, 6d rotation, gripper_width)
-
+shape_meta: &shape_meta
+  # acceptable types: rgb, low_dim
+  obs:
+    left_wrist_img:
+      shape: ${task.image_shape}
+      type: rgb
+    left_robot_tcp_pose:
+      shape: [9]
+      type: low_dim
+    left_robot_gripper_width:
+      shape: [1]
+      type: low_dim
+    left_robot_tcp_wrench:
+      shape: [6]
+      type: low_dim
+  extended_obs: # for the AT RNN decoder of the latent diffusion policy
+    left_robot_tcp_wrench:
+      shape: [6]
+      type: low_dim
+  action:
+    shape: [10] # (3+6+1) (x, y, z, 6d rotation, gripper_width)
 dataset:
   _target_: reactive_diffusion_policy.dataset.real_image_tactile_dataset.RealImageTactileDataset
   shape_meta: *shape_meta

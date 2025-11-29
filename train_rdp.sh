@@ -58,17 +58,19 @@ TIMESTAMP=$(date +%m%d%H%M%S)
 SEARCH_PATH="./data/outputs"
 
 # Stage 1: 训练 AT
-CUDA_VISIBLE_DEVICES=${GPU_ID} python train.py \
-    --config-name=train_at_workspace \
-    task=${AT_TASK} \
-    task.dataset_path=${DATASET_PATH} \
-    task.name=${AT_TASK}_${TIMESTAMP} \
-    at=${AT_CONFIG} \
-    logging.mode=${LOGGING_MODE}
+# CUDA_VISIBLE_DEVICES=${GPU_ID} python train.py \
+#     --config-name=train_at_workspace \
+#     task=${AT_TASK} \
+#     task.dataset_path=${DATASET_PATH} \
+#     task.name=${AT_TASK}_${TIMESTAMP} \
+#     at=${AT_CONFIG} \
+#     logging.mode=${LOGGING_MODE}
 
 # 找刚训练好的 AT checkpoint
-AT_LOAD_DIR=$(find "${SEARCH_PATH}" -maxdepth 2 -path "*${TIMESTAMP}*" -type d)/checkpoints/latest.ckpt
+# AT_LOAD_DIR=$(find "${SEARCH_PATH}" -maxdepth 2 -path "*${TIMESTAMP}*" -type d)/checkpoints/latest.ckpt
 
+
+AT_LOAD_DIR="./data/outputs/2025.11.29/08.01.50_train_vae_wmx_real_plugin_image_wrench_at_24fps_1129080148/checkpoints/latest.ckpt"
 # Stage 2: 训练 LDP/RDP
 CUDA_VISIBLE_DEVICES=${GPU_ID} accelerate launch train.py \
     --config-name=train_latent_diffusion_unet_real_image_workspace \
