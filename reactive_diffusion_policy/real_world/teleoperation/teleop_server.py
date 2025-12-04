@@ -266,7 +266,7 @@ class TeleopServer:
                                         f"with force {grasp_force}")
                             self.send_command('/move_gripper_force/left', {
                                 'width': left_gripper_width_target, 
-                                'velocity': 10.0,
+                                'velocity': 0.1,
                                 'force_limit': grasp_force
                             })
                         else:

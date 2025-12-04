@@ -132,7 +132,7 @@ class FlexivController:
             logger.warning("Fault occurred on robot server, trying to clear ...")
             #self.log.warn("Fault occurred on robot server, trying to clear ...")
             # Try to clear the fault
-            self.robot.clearFault()
+            self.robot.ClearFault()
             time.sleep(2)
             # Check again
             if self.robot.isFault():
@@ -302,11 +302,11 @@ class FlexivController:
         
         
     def execute_primitive(self, primitive_command: str):
-        self.robot.setMode(self.mode.NRT_PRIMITIVE_EXECUTION)
-        self.robot.executePrimitive(primitive_command)
-        while self.parse_pt_states(self.robot.getPrimitiveStates(), "reachedTarget") != "1":
+        self.robot.SwitchMode(self.mode.NRT_PRIMITIVE_EXECUTION)
+        self.robot.ExecutePrimitive(primitive_command)
+        while self.parse_pt_states(self.robot.primitive_states(), "reachedTarget") != "1":
             time.sleep(0.1)
-        self.robot.setMode(self.mode.NRT_CARTESIAN_MOTION_FORCE)
+        self.robot.SwitchMode(self.mode.NRT_CARTESIAN_MOTION_FORCE)
 
     @staticmethod
     def parse_pt_states(pt_states, parse_target):

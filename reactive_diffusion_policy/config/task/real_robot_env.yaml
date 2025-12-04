@@ -20,8 +20,8 @@ publisher:
     vr_server_force_port: 10005
     bimanual_teleop: *bimanual_teleop
 teleop_server:
-  #host_ip: "192.168.2.169"
-  host_ip: "0.0.0.0"
+  host_ip: "192.168.2.169"
+  #host_ip: "0.0.0.0"
   port: 8082
   fps: 60
   use_force_control_for_gripper: False

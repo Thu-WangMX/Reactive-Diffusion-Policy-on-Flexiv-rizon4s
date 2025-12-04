@@ -19,13 +19,13 @@ def get_topic_and_type(device_to_topic: DeviceToTopic):
 
     subs_name_type.extend([
         ('/left_tcp_pose', PoseStamped),
-        ('/right_tcp_pose', PoseStamped),
+        #('/right_tcp_pose', PoseStamped),
         ('/left_gripper_state', JointState),
-        ('/right_gripper_state', JointState),
+        #('/right_gripper_state', JointState),
         ('/left_tcp_vel', TwistStamped),
-        ('/right_tcp_vel', TwistStamped),
+        #('/right_tcp_vel', TwistStamped),
         ('/left_tcp_wrench', WrenchStamped),
-        ('/right_tcp_wrench', WrenchStamped),
+        #('/right_tcp_wrench', WrenchStamped),
         # 新增：左臂关节状态
         ('/left_joint_state', JointState)
     ])

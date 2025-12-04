@@ -34,7 +34,7 @@ left_tcp_pose         = root["left_robot_tcp_pose"][-N:]    # (N, 9)
 left_tcp_wrench       = root["left_robot_tcp_wrench"][-N:]  # (N, 6)
 left_q                = root["left_robot_q"][-N:]           # (N, J)
 left_tau              = root["left_robot_tau"][-N:]         # (N, J)
-gripper_width         = root["left_robot_gripper_width"][:N] #[:N]
+gripper_width         = root["left_robot_gripper_width"][-N:]#[:N]
 
 # right_robot_tcp_pose = root ["right_robot_tcp_pose"][:N]
 # left_gripper2_marker_offset_emb = root ["left_gripper2_marker_offset_emb"][:N] #全为0

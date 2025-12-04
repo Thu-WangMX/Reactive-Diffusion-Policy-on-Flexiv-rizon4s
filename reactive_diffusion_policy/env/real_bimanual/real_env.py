@@ -71,7 +71,8 @@ class RealRobotEnvironment(Node):
                  grasp_force: float = 5.0,
                  enable_gripper_interval_control: bool = False,
                  gripper_control_time_interval: float = 60,
-                 gripper_control_width_precision: float = 0.02,
+                 #$\gripper_control_width_precision: float = 0.02,
+                 gripper_control_width_precision: float = 0.01,
                  gripper_width_threshold: float = 0.04,
                  enable_gripper_width_clipping: bool = True,
                  enable_exp_recording: bool = False,
@@ -384,13 +385,14 @@ class RealRobotEnvironment(Node):
         """
         self.send_command('/move_gripper/left', {
             'width': left_gripper_width_target,
-            'velocity': 10.0,
+            'velocity': 0.1,
             'force_limit': self.grasp_force
         })
         self.last_gripper_width_target[0] = left_gripper_width_target
+        
         self.send_command('/move_gripper/right', {
             'width': right_gripper_width_target,
-            'velocity': 10.0,
+            'velocity': 0.1,
             'force_limit': self.grasp_force
         })
         self.last_gripper_width_target[1] = right_gripper_width_target
@@ -420,24 +422,33 @@ class RealRobotEnvironment(Node):
         grasp_force = self.grasp_force
         gripper_control_width_precision = self.gripper_control_width_precision
         left_current_width = robot_states.leftGripperState[0]
+        print("left_gripper_width_target",left_gripper_width_target)
+        print("gripper_control_width_precision",gripper_control_width_precision)
+        print("enable_gripper_interval_control",self.enable_gripper_interval_control)
+        print("left_current_width",left_current_width)
         if abs(self.last_gripper_width_target[0] - left_gripper_width_target) >= gripper_control_width_precision:
             if self.use_force_control_for_gripper and self.last_gripper_width_target[0] > left_gripper_width_target:
                 # try to close gripper with pure force control
-                logger.debug(f"left gripper moving from {left_current_width} to target: {left_gripper_width_target} "
+                logger.debug(f"close left gripper moving from {left_current_width} to target: {left_gripper_width_target} "
                              f"with force {grasp_force}")
-                self.send_command('/move_gripper_force/left', {
+                self.send_command('/move_gripper/left', {
+                    #'width': 0.1,
+                    'width': left_gripper_width_target,
+                    'velocity': 0.1,
                     'force_limit': grasp_force
                 })
             else:
                 # open gripper with position control
-                logger.debug(f"left gripper moving from {left_current_width} to target: {left_gripper_width_target}")
+                logger.debug(f"oepn left gripper moving from {left_current_width} to target: {left_gripper_width_target}")
                 self.send_command('/move_gripper/left', {
                     'width': left_gripper_width_target,
-                    'velocity': 10.0,
+                    #'width': 0.1,
+                    'velocity': 0.1,
                     'force_limit': grasp_force
                 })
             self.last_gripper_width_target[0] = left_gripper_width_target
-
+            #self.last_gripper_width_target[0] = 0.1
+            
         if is_bimanual:
             right_current_width = robot_states.rightGripperState[0]
             if abs(self.last_gripper_width_target[1] - right_gripper_width_target) >= gripper_control_width_precision:
@@ -453,7 +464,7 @@ class RealRobotEnvironment(Node):
                     logger.debug(f"right gripper moving from {right_current_width} to target: {right_gripper_width_target}")
                     self.send_command('/move_gripper/right', {
                         'width': right_gripper_width_target,
-                        'velocity': 10.0,
+                        'velocity': 0.1,
                         'force_limit': grasp_force
                     })
                 self.last_gripper_width_target[1] = right_gripper_width_target

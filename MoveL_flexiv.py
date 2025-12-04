@@ -20,6 +20,8 @@ try:
     position = [0.5300 ,-0.0269 , 0.30]
     euler_degrees = [-179.1952  ,  0.2877   ,-178.6688]
     robot.MoveL(position,euler_degrees, speed=0.1, acc=0.1)
+    # robot.Move_gripper(0.07, speed=0.1, force=10.0)
+    print("完成MoveL和Movegripper")
 except Exception as e:
     print(f"发生错误: {e}")
 

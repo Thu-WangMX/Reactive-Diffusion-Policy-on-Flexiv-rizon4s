@@ -119,7 +119,8 @@ class RealRunner:
         rclpy.init(args=None)
         self.env = RealRobotEnvironment(transforms=self.transforms, **env_params)
         # set gripper to max width
-        self.env.send_gripper_command_direct(self.env.max_gripper_width, self.env.max_gripper_width)
+        # 新增：策略开始前不张开夹爪
+        #self.env.send_gripper_command_direct(self.env.max_gripper_width, self.env.max_gripper_width)
         time.sleep(2)
 
         self.max_duration_time = max_duration_time
@@ -427,8 +428,8 @@ class RealRunner:
                 logger.info("Start episode rollout.")
                 # start rollout
                 self.env.reset()
-                # set gripper to max width
-                self.env.send_gripper_command_direct(self.env.max_gripper_width, self.env.max_gripper_width)
+                # set gripper to max width 新增：策略开始前不张开夹爪
+                #self.env.send_gripper_command_direct(self.env.max_gripper_width, self.env.max_gripper_width)
                 time.sleep(1)
 
                 policy.reset()

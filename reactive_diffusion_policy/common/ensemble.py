@@ -76,7 +76,12 @@ class EnsembleBuffer:
         actions_timestep = self.actions_timestep[0]
         if actions == []:
             return None      # no data
-        sorted_actions = sorted(zip(actions_timestep, actions))
+        #sorted_actions = sorted(zip(actions_timestep, actions))
+        #修改：策略推理
+        sorted_actions = sorted(
+            zip(actions_timestep, actions),
+            key=lambda x: float(x[0])  # 确保只按 timestep 排序
+        )
         all_actions = np.array([x for _, x in sorted_actions])
         all_timesteps = np.array([t for t, _ in sorted_actions])
         if self.mode == "new":

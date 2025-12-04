@@ -35,7 +35,8 @@ shape_meta: &shape_meta
 env_runner:
   _target_: reactive_diffusion_policy.env_runner.real_runner.RealRunner
   eval_episodes: 10
-  max_duration_time: 35
+  #max_duration_time: 35
+  max_duration_time: 300
   tcp_action_update_interval: 16
   gripper_action_update_interval: 16
   tcp_pos_clip_range: # no clip for x, y, clip for z
@@ -66,7 +67,7 @@ env_runner:
     ensemble_mode: 'new'
   use_relative_action: ${task.dataset.relative_action}
   action_interpolation_ratio: 1
-  enable_video_recording: True
+  enable_video_recording: False
   vcamera_server_ip:
     - 192.168.2.252
     - 192.168.2.252
@@ -99,7 +100,7 @@ env_runner:
       use_6d_rotation: True
       marker_dimension: 2
       debug: False
-    max_fps: 10
+    #max_fps: 10
     debug: False
     # gripper control params
     use_force_control_for_gripper: ${task.teleop_server.use_force_control_for_gripper}

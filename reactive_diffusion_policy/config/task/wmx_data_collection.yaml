@@ -9,7 +9,7 @@ teleop_server:
   min_gripper_width: 0.0
   grasp_force: 25.0
   gripper_control_time_interval: 30
-  gripper_control_width_precision: 0.01
+  gripper_control_width_precision: 0.005
   gripper_never_open: False
   # teleoperation mode
   teleop_mode: 'left_arm_6DOF'

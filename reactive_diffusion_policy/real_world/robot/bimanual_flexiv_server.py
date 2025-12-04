@@ -35,7 +35,7 @@ class BimanualFlexivServer():
         #self.left_robot.robot.SwitchMode(self.left_robot.mode.NRT_CARTESIAN_MOTION_FORCE)
         if self.bimanual_teleop:
             self.right_robot = FlexivController(robot_sn, gripper_name,remote_control = True)
-            self.right_robot.robot.setMode(self.right_robot.mode.NRT_CARTESIAN_MOTION_FORCE)
+            self.right_robot.robot.SwitchMode(self.right_robot.mode.NRT_CARTESIAN_MOTION_FORCE)
         else:
             self.right_robot = None
 
@@ -252,9 +252,9 @@ class BimanualFlexivServer():
             if self.planner is None:
                 return {"message": "Planner is not available"}
             
-            self.left_robot.robot.setMode(self.left_robot.mode.NRT_JOINT_POSITION)
+            self.left_robot.robot.SwitchMode(self.left_robot.mode.NRT_JOINT_POSITION)
             if self.bimanual_teleop:
-                self.right_robot.robot.setMode(self.right_robot.mode.NRT_JOINT_POSITION)
+                self.right_robot.robot.SwitchMode(self.right_robot.mode.NRT_JOINT_POSITION)
 
             if self.bimanual_teleop:
                 current_q = self.left_robot.get_current_q() + self.right_robot.get_current_q()
@@ -269,9 +269,9 @@ class BimanualFlexivServer():
                     self.right_robot.move(js[7:])
                 time.sleep(0.01)
 
-            self.left_robot.robot.setMode(self.left_robot.mode.NRT_CARTESIAN_MOTION_FORCE)
+            self.left_robot.robot.SwitchMode(self.left_robot.mode.NRT_CARTESIAN_MOTION_FORCE)
             if self.bimanual_teleop:
-                self.right_robot.robot.setMode(self.right_robot.mode.NRT_CARTESIAN_MOTION_FORCE)
+                self.right_robot.robot.SwitchMode(self.right_robot.mode.NRT_CARTESIAN_MOTION_FORCE)
             return {"message": "Bimanual robots have gone home"}
 
     def run(self):
