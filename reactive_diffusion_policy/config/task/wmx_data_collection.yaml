@@ -7,12 +7,13 @@ teleop_server:
   use_force_control_for_gripper: True
   max_gripper_width: 0.1
   min_gripper_width: 0.0
-  grasp_force: 25.0
+  grasp_force: 80
   gripper_control_time_interval: 30
   gripper_control_width_precision: 0.005
   gripper_never_open: False
   # teleoperation mode
-  teleop_mode: 'left_arm_6DOF'
+  #teleop_mode: 'left_arm_6DOF'
+  teleop_mode: 'left_arm_3D_translation_Z_rotation' # wiping board
   relative_translation_scale: 1.0  # for dexterous teleoperation
   bimanual_teleop: &bimanual_teleop False
 

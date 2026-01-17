@@ -4,12 +4,12 @@ import matplotlib.pyplot as plt
 
 # -------------------------- 1. 读取数据（与修改后代码一致）--------------------------
 # 读取 episode_ends（episode 结束索引）
-zarr_path_meta = "/home/wmx/myspace/RDP/data/plug_in_stream_downsample1_zarr/replay_buffer.zarr/meta"
+zarr_path_meta = "/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/datdaset/plug_in_stream_downsample1_zarr/replay_buffer.zarr/meta"
 root_meta = zarr.open(zarr_path_meta, mode="r")
 episode_ends = root_meta["episode_ends"][:]  # shape (50,)，共50个episode
 
 # 读取 TCP 力/扭矩数据，提取 Fz 分量（索引2）
-zarr_path_data = "/home/wmx/myspace/RDP/data/plug_in_stream_downsample1_zarr/replay_buffer.zarr/data"
+zarr_path_data = "/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/datdaset/plug_in_stream_downsample1_zarr/replay_buffer.zarr/data"
 root_data = zarr.open(zarr_path_data, mode="r")
 tcp_wrench = root_data["left_robot_tcp_wrench"][:]  # shape (总帧数, 6)：Fx,Fy,Fz,Tx,Ty,Tz
 fz_force = tcp_wrench[:, 2]  # 提取所有帧的 Fz 力，shape (总帧数,)

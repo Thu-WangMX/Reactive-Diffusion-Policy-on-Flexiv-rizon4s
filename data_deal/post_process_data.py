@@ -19,7 +19,7 @@ DEBUG_TACTILE_LATENCY = False  # for debugging tactile latency
 DRAW_FORCE = False  # for debugging force
 USE_ABSOLUTE_ACTION = True
 
-TAG = 'plug_in' #任务名称
+TAG = 'wiping_board' #任务名称
 ACTION_DIM = 10  # (4 + 15)
 TEMPORAL_DOWNSAMPLE_RATIO = 3  # the ratio for temporal down-sampling
 SENSOR_MODE = 'single_arm_two_realsense_two_tactile'

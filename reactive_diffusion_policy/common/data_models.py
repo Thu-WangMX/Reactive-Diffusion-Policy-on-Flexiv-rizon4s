@@ -133,3 +133,4 @@ class TeleopMode(Enum):
     left_arm_3D_translation = auto()
     left_arm_3D_translation_Y_rotation = auto()
     dual_arm_3D_translation = auto()
+    left_arm_3D_translation_Z_rotation = auto()

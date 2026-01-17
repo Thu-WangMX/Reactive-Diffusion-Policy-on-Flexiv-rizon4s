@@ -143,3 +143,37 @@ rdp_venv/
 
 # Pycharm
 .idea/
+
+# 忽略数据目录（核心需求）
+dataset/
+dataset_pkl/
+
+# 忽略zarr数据（如果你有）
+*.zarr/
+
+# 忽略虚拟环境（避免上传依赖包）
+rdp_venv/
+
+# 忽略Python缓存文件
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 忽略日志文件
+*.log
+logs/
+
+# 忽略临时文件/缓存
+*.tmp
+*.swp
+.DS_Store  # Mac系统特有
+.idea/     # PyCharm配置
+.vscode/   # VSCode配置
+
+# 忽略模型文件/权重（如果有）
+*.pth
+*.ckpt
+
+#Foar
+
+FoAR/

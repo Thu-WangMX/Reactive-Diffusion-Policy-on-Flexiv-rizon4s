@@ -23,7 +23,7 @@ class RealsenseCameraPublisher(Node):
                  camera_type: str = 'D400',  # L500
                  camera_name: str = 'camera_base',
                  rgb_resolution: tuple = (640, 480),
-                 exposure: int = 120,
+                 exposure: int = 200,
                  white_balance: int = 5900,  # 2800-6500
                  depth_resolution: tuple = (640, 480),
                  fps: int = 30,
@@ -152,7 +152,9 @@ class RealsenseCameraPublisher(Node):
         self.color_sensor = device.first_color_sensor()
         self.color_sensor.set_option(rs.option.global_time_enabled, 1)
         # realsense exposure
-        self.set_exposure(exposure=self.exposure, gain=0)
+        #self.set_exposure(exposure=self.exposure, gain=0)
+        self.set_exposure(exposure=None, gain=None)#设置自动曝光
+        print("已设置为自动曝光")
         # realsense white balance
         self.set_white_balance(white_balance=self.white_balance)
 

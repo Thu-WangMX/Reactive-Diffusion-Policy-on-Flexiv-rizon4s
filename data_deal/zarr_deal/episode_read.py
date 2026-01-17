@@ -1,7 +1,7 @@
 import zarr
 import numpy as np
 
-zarr_path = "/home/wmx/myspace/RDP/data/plug_in_stream_downsample1_zarr/replay_buffer.zarr"
+zarr_path =  "/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/datdaset/plug_in_stream_downsample1_zarr/replay_buffer.zarr"
 
 # 打开 zarr 根
 root = zarr.open(zarr_path, mode="r")

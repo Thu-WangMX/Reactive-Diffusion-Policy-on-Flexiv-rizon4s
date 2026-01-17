@@ -1,4 +1,14 @@
 # 1. 从您提供的文件中导入FlexivRobot类
+import sys
+import os
+
+# 获取当前脚本的绝对路径
+current_dir = os.path.dirname(os.path.abspath(__file__))
+# 获取上一级目录（即项目根目录）的路径
+parent_dir = os.path.dirname(current_dir)
+
+# 将项目根目录添加到 sys.path 中
+sys.path.append(parent_dir)
 from FlexivRobot import FlexivRobot
 import numpy as np
 
@@ -19,8 +29,9 @@ try:
 
     position = [0.5300 ,-0.0269 , 0.30]
     euler_degrees = [-179.1952  ,  0.2877   ,-178.6688]
+    robot.Move_gripper(0.1, speed=0.1, force=10.0)
     robot.MoveL(position,euler_degrees, speed=0.1, acc=0.1)
-    # robot.Move_gripper(0.07, speed=0.1, force=10.0)
+
     print("完成MoveL和Movegripper")
 except Exception as e:
     print(f"发生错误: {e}")

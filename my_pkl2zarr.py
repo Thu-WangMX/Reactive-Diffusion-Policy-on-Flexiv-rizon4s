@@ -22,9 +22,9 @@ DRAW_FORCE = False             # 同上
 
 USE_ABSOLUTE_ACTION = True
 
-TAG = 'plug_in'  # 任务名称，对应 data 目录名
+TAG = 'wiping_board'  # 任务名称，对应 data 目录名
 ACTION_DIM = 10  # 我们现在只支持 4 或 10，其他 raise
-TEMPORAL_DOWNSAMPLE_RATIO = 1  # 每条 episode 内的时间下采样比例
+TEMPORAL_DOWNSAMPLE_RATIO = 2  # 每条 episode 内的时间下采样比例
 
 SENSOR_MODE = 'single_arm_two_realsense_two_tactile'
 GELSIGHT_PCA_PATH = 'data/PCA_Transform_GelSight'
@@ -50,8 +50,8 @@ def downsample_indices_per_episode(length: int, ratio: int):
 
 if __name__ == '__main__':
     # ========= 路径设置 =========
-    data_dir = f'/home/wmx/myspace/RDP/data/{TAG}'
-    save_data_dir = f'/home/wmx/myspace/RDP/data/{TAG}_stream_downsample{TEMPORAL_DOWNSAMPLE_RATIO}{"_debug" if DEBUG else ""}_zarr'
+    data_dir = f'/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/dataset_pkl/{TAG}'
+    save_data_dir = f'/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/dataset/{TAG}_stream_downsample{TEMPORAL_DOWNSAMPLE_RATIO}{"_debug" if DEBUG else ""}_zarr'
     os.makedirs(save_data_dir, exist_ok=True)
     save_data_path = osp.join(osp.abspath(os.getcwd()), save_data_dir, 'replay_buffer.zarr')
 

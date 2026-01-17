@@ -1,4 +1,16 @@
 # 1. 从您提供的文件中导入FlexivRobot类
+import sys
+import os
+
+# 获取当前脚本的绝对路径
+current_dir = os.path.dirname(os.path.abspath(__file__))
+# 获取上一级目录（即项目根目录）的路径
+parent_dir = os.path.dirname(current_dir)
+
+# 将项目根目录添加到 sys.path 中
+sys.path.append(parent_dir)
+
+# --- 现在可以正常导入了 ---
 from FlexivRobot import FlexivRobot
 import numpy as np
 

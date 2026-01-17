@@ -94,8 +94,8 @@ class FlexivController:
                 self.gripper.Enable(gripper_name)
                 
                 
-                self.gripper.Move(0,0.1,20)#新增：初始时闭合夹爪
-                print("夹爪闭合")
+                # self.gripper.Move(0,0.1,20)#新增：初始时闭合夹爪
+                # print("夹爪闭合")
        
                 
                 #初始化，在开机时可以先在示教器上手动初始化

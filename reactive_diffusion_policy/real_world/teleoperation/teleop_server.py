@@ -383,6 +383,25 @@ class TeleopServer:
                                                             @ pose_6d_to_4x4matrix(left_target_6d_in_world))
                             )
                             print("TeleopMode为:",self.teleop_mode)
+
+                        elif self.teleop_mode == TeleopMode.left_arm_3D_translation_Z_rotation:
+                            # Z轴旋转模式：允许平移 + Z轴(Yaw)旋转
+                            # 需要锁定 Roll (rx, index 3) 和 Pitch (ry, index 4)
+                            
+                            # 1. 锁定 Roll (X轴旋转) 固定为 -pi (根据你其他模式的设定)
+                            left_target_6d_in_world[3] = np.clip(left_target_6d_in_world[3], -np.pi, -np.pi)
+                            
+                            # 2. 锁定 Pitch (Y轴旋转) 固定为 0
+                            left_target_6d_in_world[4] = np.clip(left_target_6d_in_world[4], 0, 0)
+                            
+                            # 3. 不限制 Yaw (index 5)，让它跟随手柄输入自由转动
+
+                            # 4. 转换回机器人坐标系
+                            left_target = pose_6d_to_pose_7d(matrix4x4_to_pose_6d(self.transforms.world_to_left_robot_base_transform
+                                                            @ pose_6d_to_4x4matrix(left_target_6d_in_world))
+                            )
+                            print("TeleopMode为:", self.teleop_mode)
+                            
                         elif self.teleop_mode == TeleopMode.left_arm_6DOF:
                             left_target = left_target_7d_in_robot
                             print("TeleopMode为:",self.teleop_mode)
@@ -417,6 +436,7 @@ class TeleopServer:
                                                                         @ pose_7d_to_4x4matrix(right_target_7d_in_robot))
                         if self.teleop_mode == TeleopMode.left_arm_3D_translation \
                         or self.teleop_mode == TeleopMode.left_arm_3D_translation_Y_rotation \
+                        or self.teleop_mode == TeleopMode.left_arm_3D_translation_Z_rotation \
                         or self.teleop_mode == TeleopMode.left_arm_6DOF:
                             right_target = right_target_7d_in_robot
                         elif self.teleop_mode == TeleopMode.dual_arm_3D_translation:
