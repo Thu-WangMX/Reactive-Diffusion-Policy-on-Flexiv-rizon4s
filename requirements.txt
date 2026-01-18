@@ -35,7 +35,7 @@ av
 cmake
 timm
 peft
-# for teleop
+# for teleop 训练也要装
 fastapi
 uvicorn
 pyrealsense2

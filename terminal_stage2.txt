@@ -1,0 +1,3 @@
+=== RDP Pipeline Started ===
+[Stage 2] Training LDP... (Logs: rdp_train_logs/wmx_real_wiping_board_two_cam_image_wrench_ldp_24fps_0118011729.log)
+🎉 All Stages Completed! Logs in rdp_train_logs
