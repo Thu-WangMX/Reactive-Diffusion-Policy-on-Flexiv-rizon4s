@@ -1,10 +1,12 @@
 # train_paep.py
 import argparse
 import os
+import time
 import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 from paep_dataset import PAEPZarrDataset, EVENT_NAMES
 from paep_model import PAEPNet
@@ -16,7 +18,6 @@ except Exception:
 
 
 def class_weights_from_counts(counts: dict):
-    # weight = total / (K * count), normalize mean=1
     total = sum(counts.values())
     K = len(EVENT_NAMES)
     w = []
@@ -29,11 +30,7 @@ def class_weights_from_counts(counts: dict):
 
 
 @torch.no_grad()
-def eval_one_epoch(model, dl, device):
-    """
-    Offline eval on sampled segments (val split dataloader).
-    Returns (loss, acc).
-    """
+def eval_one_epoch(model, dl, device, use_amp: bool):
     model.eval()
     total = 0
     correct = 0
@@ -47,16 +44,25 @@ def eval_one_epoch(model, dl, device):
         pose = batch["tcp_pose"].to(device, non_blocking=True)
         y = batch["event"].to(device, non_blocking=True)
 
-        logits = model(ext, wrist, wrench, pose)   # [B,S,C]
-        B, S, C = logits.shape
-        loss = ce(logits.reshape(B*S, C), y.reshape(B*S))
+        with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=use_amp):
+            logits = model(ext, wrist, wrench, pose)  # [B,S,C]
+            B, S, C = logits.shape
+            loss = ce(logits.reshape(B * S, C), y.reshape(B * S))
 
         pred = logits.argmax(dim=-1)
         correct += int((pred == y).sum().item())
         total += int(y.numel())
-        loss_sum += float(loss.item()) * (B*S)
+        loss_sum += float(loss.item()) * (B * S)
 
     return loss_sum / max(1, total), correct / max(1, total)
+
+
+def gpu_mem_gb():
+    if not torch.cuda.is_available():
+        return 0.0, 0.0
+    alloc = torch.cuda.memory_allocated() / 1024**3
+    peak = torch.cuda.max_memory_allocated() / 1024**3
+    return alloc, peak
 
 
 def main():
@@ -65,7 +71,7 @@ def main():
     ap.add_argument("--split_json", type=str, required=True)
     ap.add_argument("--save_dir", type=str, default="./paep_runs")
 
-    ap.add_argument("--batch_size", type=int, default=8)
+    ap.add_argument("--batch_size", type=int, default=6)
     ap.add_argument("--segment_len", type=int, default=96)
     ap.add_argument("--samples_per_epoch", type=int, default=20000)
     ap.add_argument("--val_samples", type=int, default=4000)
@@ -76,18 +82,23 @@ def main():
 
     ap.add_argument("--img_pretrained", action="store_true")
     ap.add_argument("--force_k", type=int, default=25)
+    ap.add_argument("--img_micro_batch", type=int, default=64)
+
     ap.add_argument("--seed", type=int, default=0)
 
-    # ---- wandb ----
+    # AMP + 梯度累积
+    ap.add_argument("--amp", action="store_true")
+    ap.add_argument("--grad_accum", type=int, default=1)
+
+    # tqdm / logging
+    ap.add_argument("--log_interval", type=int, default=50, help="steps between tqdm postfix updates AND wandb step logs")
+    ap.add_argument("--eval_every", type=int, default=1, help="eval every N epochs")
+
+    # wandb
     ap.add_argument("--use_wandb", action="store_true")
     ap.add_argument("--wandb_project", type=str, default="PAEP")
     ap.add_argument("--wandb_name", type=str, default=None)
     ap.add_argument("--wandb_mode", type=str, default="online", choices=["online", "offline", "disabled"])
-
-    # ---- optional: run test once at end ----
-    ap.add_argument("--run_test", action="store_true")
-    ap.add_argument("--test_chunk", type=int, default=256)
-    ap.add_argument("--test_max_frames", type=int, default=None)
 
     args = ap.parse_args()
 
@@ -95,14 +106,16 @@ def main():
     np.random.seed(args.seed)
     os.makedirs(args.save_dir, exist_ok=True)
 
-    # ---------------- datasets ----------------
+    torch.backends.cudnn.benchmark = True
+
+    # datasets
     train_ds = PAEPZarrDataset(
         args.zarr_path,
         segment_len=args.segment_len,
         samples_per_epoch=args.samples_per_epoch,
         split_json=args.split_json,
         split="train",
-        norm_stats=None,          # compute from train
+        norm_stats=None,
         norm_from_split="train",
         norm_max_samples=None,
         seed=args.seed,
@@ -113,7 +126,7 @@ def main():
         samples_per_epoch=args.val_samples,
         split_json=args.split_json,
         split="val",
-        norm_stats=train_ds.norm,  # reuse train norm
+        norm_stats=train_ds.norm,
         seed=args.seed + 1,
     )
 
@@ -122,15 +135,26 @@ def main():
     print("Val class counts:", val_ds.class_counts)
 
     train_dl = DataLoader(
-        train_ds, batch_size=args.batch_size, shuffle=True,
-        num_workers=args.num_workers, pin_memory=True, drop_last=True
+        train_ds,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=args.num_workers,
+        pin_memory=True,
+        drop_last=True,
+        persistent_workers=(args.num_workers > 0),
+        prefetch_factor=2 if args.num_workers > 0 else None,
     )
     val_dl = DataLoader(
-        val_ds, batch_size=args.batch_size, shuffle=False,
-        num_workers=args.num_workers, pin_memory=True, drop_last=False
+        val_ds,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        pin_memory=True,
+        drop_last=False,
+        persistent_workers=(args.num_workers > 0),
+        prefetch_factor=2 if args.num_workers > 0 else None,
     )
 
-    # ---------------- model ----------------
     model = PAEPNet(
         num_events=len(EVENT_NAMES),
         img_pretrained=args.img_pretrained,
@@ -140,14 +164,17 @@ def main():
         proprio_dim=128,
         fusion_hidden=256,
         use_fusion_gru=True,
+        img_micro_batch=args.img_micro_batch,
     ).to(args.device)
 
-    # loss + opt
     w = class_weights_from_counts(train_ds.class_counts).to(args.device)
     ce = nn.CrossEntropyLoss(weight=w)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr)
 
-    # ---------------- wandb ----------------
+    # ✅ AMP scaler (new API)
+    scaler = torch.amp.GradScaler("cuda", enabled=args.amp)
+
+    # wandb
     run = None
     if args.use_wandb:
         if wandb is None:
@@ -167,55 +194,120 @@ def main():
                 "lr": args.lr,
                 "force_k": args.force_k,
                 "img_pretrained": args.img_pretrained,
+                "img_micro_batch": args.img_micro_batch,
+                "amp": args.amp,
+                "grad_accum": args.grad_accum,
                 "seed": args.seed,
                 "train_class_counts": train_ds.class_counts,
                 "val_class_counts": val_ds.class_counts,
+                "log_interval": args.log_interval,
             },
         )
 
     best_val = -1.0
     best_epoch = -1
+    grad_accum = max(1, int(args.grad_accum))
 
-    # ---------------- train loop ----------------
+    # global step for wandb curves
+    global_step = 0
+
     for ep in range(args.epochs):
         model.train()
+        opt.zero_grad(set_to_none=True)
+        torch.cuda.reset_peak_memory_stats()
+
         loss_sum = 0.0
         n_frames = 0
         correct = 0
         total = 0
 
-        for batch in train_dl:
+        t0 = time.time()
+
+        pbar = tqdm(
+            enumerate(train_dl),
+            total=len(train_dl),
+            desc=f"Epoch {ep:03d}/{args.epochs-1}",
+            dynamic_ncols=True,
+        )
+
+        for it, batch in pbar:
+            global_step += 1
+
             ext = batch["external_img"].to(args.device, non_blocking=True)
             wrist = batch["wrist_img"].to(args.device, non_blocking=True)
             wrench = batch["wrench"].to(args.device, non_blocking=True)
             pose = batch["tcp_pose"].to(args.device, non_blocking=True)
             y = batch["event"].to(args.device, non_blocking=True)
 
-            logits = model(ext, wrist, wrench, pose)  # [B,S,C]
-            B, S, C = logits.shape
-            loss = ce(logits.reshape(B*S, C), y.reshape(B*S))
+            with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=args.amp):
+                logits = model(ext, wrist, wrench, pose)  # [B,S,C]
+                B, S, C = logits.shape
+                loss = ce(logits.reshape(B * S, C), y.reshape(B * S))
+                loss_scaled = loss / grad_accum
 
-            opt.zero_grad(set_to_none=True)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            opt.step()
+            scaler.scale(loss_scaled).backward()
 
-            # train stats
-            loss_sum += float(loss.item()) * (B*S)
-            n_frames += (B*S)
+            if (it + 1) % grad_accum == 0:
+                scaler.unscale_(opt)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                scaler.step(opt)
+                scaler.update()
+                opt.zero_grad(set_to_none=True)
+
+            # stats
+            loss_sum += float(loss.item()) * (B * S)
+            n_frames += (B * S)
             pred = logits.argmax(dim=-1)
             correct += int((pred == y).sum().item())
             total += int(y.numel())
 
+            # current running metrics
+            train_loss_now = loss_sum / max(1, n_frames)
+            train_acc_now = correct / max(1, total)
+
+            # tqdm + wandb step log every log_interval
+            if (it + 1) % args.log_interval == 0 or (it + 1) == len(train_dl):
+                alloc, peak = gpu_mem_gb()
+                pbar.set_postfix(
+                    loss=f"{train_loss_now:.4f}",
+                    acc=f"{train_acc_now:.3f}",
+                    mem=f"{alloc:.1f}G",
+                    peak=f"{peak:.1f}G",
+                )
+
+                if run is not None:
+                    wandb.log(
+                        {
+                            "step_train_loss": train_loss_now,
+                            "step_train_acc": train_acc_now,
+                            "gpu_mem_alloc_gb": alloc,
+                            "gpu_mem_peak_gb": peak,
+                            "lr": opt.param_groups[0]["lr"],
+                            "epoch": ep,
+                            "iter": it + 1,
+                        },
+                        step=global_step,
+                    )
+
+        # epoch metrics
         train_loss = loss_sum / max(1, n_frames)
         train_acc = correct / max(1, total)
 
-        val_loss, val_acc = eval_one_epoch(model, val_dl, args.device)
+        # eval
+        if (ep % args.eval_every) == 0:
+            val_loss, val_acc = eval_one_epoch(model, val_dl, args.device, use_amp=args.amp)
+        else:
+            val_loss, val_acc = float("nan"), float("nan")
 
-        print(f"[epoch {ep:03d}] train_loss={train_loss:.6f} train_acc={train_acc:.4f}  "
-              f"val_loss={val_loss:.6f} val_acc={val_acc:.4f}")
+        dt = time.time() - t0
+        alloc, peak = gpu_mem_gb()
 
-        # save checkpoint
+        print(f"[epoch {ep:03d}] "
+              f"train_loss={train_loss:.6f} train_acc={train_acc:.4f}  "
+              f"val_loss={val_loss:.6f} val_acc={val_acc:.4f}  "
+              f"time={dt:.1f}s mem={alloc:.2f}G peak={peak:.2f}G")
+
+        # save ckpt
         ckpt = {
             "model": model.state_dict(),
             "event_names": EVENT_NAMES,
@@ -234,29 +326,30 @@ def main():
             "train_acc": train_acc,
             "val_loss": val_loss,
             "val_acc": val_acc,
+            "amp": args.amp,
+            "img_micro_batch": args.img_micro_batch,
+            "grad_accum": grad_accum,
         }
         torch.save(ckpt, os.path.join(args.save_dir, f"paep_ep{ep:03d}.pt"))
 
-        # best
-        if val_acc > best_val:
+        if val_acc == val_acc and val_acc > best_val:  # guard NaN
             best_val = val_acc
             best_epoch = ep
             torch.save(ckpt, os.path.join(args.save_dir, "paep_best.pt"))
 
-        # wandb log
+        # wandb epoch-level log (val curves)
         if run is not None:
             wandb.log(
                 {
-                    "epoch": ep,
-                    "train_loss": train_loss,
-                    "train_acc": train_acc,
+                    "epoch_train_loss": train_loss,
+                    "epoch_train_acc": train_acc,
                     "val_loss": val_loss,
                     "val_acc": val_acc,
-                    "lr": opt.param_groups[0]["lr"],
+                    "epoch_time_sec": dt,
                     "best_val_acc_so_far": best_val,
                     "best_epoch_so_far": best_epoch,
                 },
-                step=ep,
+                step=global_step,
             )
 
     print("Done. Best val acc:", best_val, "best epoch:", best_epoch)
@@ -264,38 +357,6 @@ def main():
     if run is not None:
         run.summary["best_val_acc"] = best_val
         run.summary["best_epoch"] = best_epoch
-
-    # ---------------- optional: run test once and log ----------------
-    if args.run_test:
-        # run eval_paep.py logic in-process to avoid extra command
-        from eval_paep import evaluate_split  # uses same file below
-        test_res = evaluate_split(
-            zarr_path=args.zarr_path,
-            ckpt_path=os.path.join(args.save_dir, "paep_best.pt"),
-            split_json=args.split_json,
-            split="test",
-            device=args.device,
-            chunk=args.test_chunk,
-            max_frames=args.test_max_frames,
-            return_cm=True,
-        )
-        print("[TEST] acc:", test_res["acc"], "frames:", test_res["frames"])
-        if run is not None:
-            wandb.log(
-                {
-                    "test_acc": test_res["acc"],
-                    "test_frames": test_res["frames"],
-                },
-                step=args.epochs,
-            )
-            # 混淆矩阵可以作为 artifact/表格上传（这里给简单 table）
-            cm = test_res["cm"]
-            table = wandb.Table(columns=["gt\\pred"] + EVENT_NAMES)
-            for i, name in enumerate(EVENT_NAMES):
-                table.add_data(name, *[int(cm[i, j]) for j in range(len(EVENT_NAMES))])
-            wandb.log({"test_confusion_matrix": table}, step=args.epochs)
-
-    if run is not None:
         run.finish()
 
 

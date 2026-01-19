@@ -47,6 +47,7 @@ class PAEPNet(nn.Module):
         proprio_dim=128,
         fusion_hidden=256,
         use_fusion_gru=True,
+        img_micro_batch: int = 64,   # ✅关键：图像编码分块，避免峰值显存爆炸
     ):
         super().__init__()
         self.ext_backbone, ext_dim = make_resnet18(pretrained=img_pretrained)
@@ -73,13 +74,22 @@ class PAEPNet(nn.Module):
             head_in = fused_dim
 
         self.head = nn.Linear(head_in, num_events)
+        self.img_micro_batch = int(img_micro_batch)
 
     def _encode_img(self, backbone, proj, x):
         # x: [B,S,3,H,W]
         B, S, C, H, W = x.shape
-        x = x.reshape(B * S, C, H, W)
-        feat = backbone(x)                 # [B*S,512]
-        feat = F.relu(proj(feat), inplace=True)
+        x = x.reshape(B * S, C, H, W)  # [N,C,H,W], N=B*S
+
+        N = x.shape[0]
+        mb = max(1, self.img_micro_batch)
+        feats = []
+        for i in range(0, N, mb):
+            xi = x[i:i+mb]
+            fi = backbone(xi)                 # [mb,512]
+            fi = F.relu(proj(fi), inplace=True)
+            feats.append(fi)
+        feat = torch.cat(feats, dim=0)        # [N,D]
         return feat.reshape(B, S, -1)
 
     def forward(self, ext_img, wrist_img, wrench, tcp_pose):
@@ -92,40 +102,4 @@ class PAEPNet(nn.Module):
         if self.use_fusion_gru:
             fused, _ = self.fusion_gru(fused)
         logits = self.head(fused)
-        return logits
-
-class PAEPStreamer(nn.Module):
-    """
-    Online step-by-step inference maintaining GRU hidden states.
-    """
-    def __init__(self, net: PAEPNet):
-        super().__init__()
-        self.net = net
-        self.reset()
-
-    def reset(self):
-        self.h_force = None
-        self.h_fusion = None
-
-    @torch.no_grad()
-    def step(self, ext_img_1, wrist_img_1, wrench_1, tcp_pose_1):
-        net = self.net
-
-        # images
-        ext = net._encode_img(net.ext_backbone, net.ext_proj, ext_img_1)      # [B,1,D]
-        wrist = net._encode_img(net.wrist_backbone, net.wrist_proj, wrist_img_1)
-
-        # force (manual with hidden)
-        x = wrench_1.transpose(1, 2)               # [B,6,1]
-        x = net.force_enc.cconv(x)                 # [B,conv,1]
-        x = x.transpose(1, 2).contiguous()         # [B,1,conv]
-        y, self.h_force = net.force_enc.gru(x, self.h_force)  # [B,1,H]
-
-        p = net.proprio(tcp_pose_1)                # [B,1,P]
-        fused = torch.cat([ext, wrist, y, p], dim=-1)
-
-        if net.use_fusion_gru:
-            fused, self.h_fusion = net.fusion_gru(fused, self.h_fusion)
-
-        logits = net.head(fused)                   # [B,1,C]
         return logits
