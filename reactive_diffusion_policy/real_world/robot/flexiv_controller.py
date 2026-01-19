@@ -209,6 +209,7 @@ class FlexivController:
         self.robot.SendCartesianMotionForce(
                 target_tcp, 
                 [0.0]*6, 
+                #[0.0, 0.0, 10.0, 0.0, 0.0, 0.0],
                 0.7)
                 #1.0)
         print("机械臂执行一次tcp_move")
