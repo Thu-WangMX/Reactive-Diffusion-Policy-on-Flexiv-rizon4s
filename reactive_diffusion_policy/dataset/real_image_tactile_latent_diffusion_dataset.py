@@ -2,7 +2,7 @@ import einops
 import numpy as np
 import tqdm
 from reactive_diffusion_policy.model.vae.model import VAE
-from reactive_diffusion_policy.dataset.real_image_tactile_dataset import RealImageTactileDataset
+from reactive_diffusion_policy.dataset.real_image_tactile_dataset_v0 import RealImageTactileDataset
 from reactive_diffusion_policy.model.common.normalizer import LinearNormalizer, SingleFieldLinearNormalizer
 
 class RealImageTactileLatentDiffusionDataset(RealImageTactileDataset):
