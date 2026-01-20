@@ -1,105 +1,129 @@
-# paep_model.py
+# PAEP/paep_train/paep_model.py
+from typing import Optional, Dict
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torchvision.models import resnet18
+from torchvision.models import resnet18, ResNet18_Weights
 
-def make_resnet18(pretrained: bool = False):
-    m = resnet18(weights=("IMAGENET1K_V1" if pretrained else None))
-    m.fc = nn.Identity()
-    return m, 512
-
-class CausalConv1d(nn.Module):
-    def __init__(self, in_ch, out_ch, k, dilation=1):
-        super().__init__()
-        self.k = int(k)
-        self.dilation = int(dilation)
-        self.conv = nn.Conv1d(in_ch, out_ch, kernel_size=self.k, dilation=self.dilation)
-
-    def forward(self, x):
-        # x: [B,C,T]
-        pad = (self.k - 1) * self.dilation
-        x = F.pad(x, (pad, 0))
-        return self.conv(x)
 
 class ForceEncoder(nn.Module):
-    def __init__(self, in_dim=6, conv_dim=128, k=25, gru_hidden=256):
+    # input: (B, L, 6)
+    def __init__(self, in_dim=6, conv_channels=128, force_k=25, gru_hidden=256):
         super().__init__()
-        self.cconv = CausalConv1d(in_dim, conv_dim, k)
-        self.gru = nn.GRU(conv_dim, gru_hidden, batch_first=True)
-
-    def forward(self, wrench):
-        # wrench: [B,S,6]
-        x = wrench.transpose(1, 2)         # [B,6,S]
-        x = self.cconv(x)                  # [B,conv,S]
-        x = x.transpose(1, 2).contiguous() # [B,S,conv]
-        y, _ = self.gru(x)                 # [B,S,H]
-        return y
-
-class PAEPNet(nn.Module):
-    def __init__(
-        self,
-        num_events=6,
-        img_pretrained=False,
-        img_feat_dim=256,
-        force_k=25,
-        force_hidden=256,
-        proprio_dim=128,
-        fusion_hidden=256,
-        use_fusion_gru=True,
-        img_micro_batch: int = 64,   # ✅关键：图像编码分块，避免峰值显存爆炸
-    ):
-        super().__init__()
-        self.ext_backbone, ext_dim = make_resnet18(pretrained=img_pretrained)
-        self.wrist_backbone, wrist_dim = make_resnet18(pretrained=img_pretrained)
-
-        self.ext_proj = nn.Linear(ext_dim, img_feat_dim)
-        self.wrist_proj = nn.Linear(wrist_dim, img_feat_dim)
-
-        self.force_enc = ForceEncoder(in_dim=6, conv_dim=128, k=force_k, gru_hidden=force_hidden)
-
-        self.proprio = nn.Sequential(
-            nn.Linear(9, 128),
+        self.conv = nn.Sequential(
+            nn.Conv1d(in_dim, conv_channels, kernel_size=force_k, padding=force_k // 2),
             nn.ReLU(inplace=True),
-            nn.Linear(128, proprio_dim),
+            nn.Conv1d(conv_channels, conv_channels, kernel_size=force_k, padding=force_k // 2),
+            nn.ReLU(inplace=True),
+        )
+        self.gru = nn.GRU(input_size=conv_channels, hidden_size=gru_hidden, batch_first=True)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B, L, 6)
+        x = x.transpose(1, 2)           # (B, 6, L)
+        x = self.conv(x)                # (B, C, L)
+        x = x.transpose(1, 2)           # (B, L, C)
+        out, _ = self.gru(x)            # (B, L, H)
+        return out[:, -1]               # (B, H)
+
+
+class VisionEncoder(nn.Module):
+    def __init__(self, pretrained: bool = True, out_dim: int = 256):
+        super().__init__()
+        if pretrained:
+            backbone = resnet18(weights=ResNet18_Weights.DEFAULT)
+        else:
+            backbone = resnet18(weights=None)
+
+        # remove fc
+        backbone.fc = nn.Identity()
+        self.backbone = backbone  # outputs 512
+        self.proj = nn.Linear(512, out_dim)
+
+    def forward(self, x: torch.Tensor, img_size: int = 224) -> torch.Tensor:
+        # x: (B,3,H,W) float in [0,1]
+        if x.shape[-1] != img_size or x.shape[-2] != img_size:
+            x = F.interpolate(x, size=(img_size, img_size), mode="bilinear", align_corners=False)
+        feat = self.backbone(x)     # (B,512)
+        return self.proj(feat)      # (B,out_dim)
+
+
+class ProprioEncoder(nn.Module):
+    def __init__(self, in_dim=9, out_dim=128):
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(in_dim, 128),
+            nn.ReLU(inplace=True),
+            nn.Linear(128, out_dim),
             nn.ReLU(inplace=True),
         )
 
-        fused_dim = img_feat_dim * 2 + force_hidden + proprio_dim
-        self.use_fusion_gru = bool(use_fusion_gru)
-        if self.use_fusion_gru:
-            self.fusion_gru = nn.GRU(fused_dim, fusion_hidden, batch_first=True)
-            head_in = fusion_hidden
-        else:
-            head_in = fused_dim
+    def forward(self, x):
+        return self.mlp(x)
 
-        self.head = nn.Linear(head_in, num_events)
-        self.img_micro_batch = int(img_micro_batch)
 
-    def _encode_img(self, backbone, proj, x):
-        # x: [B,S,3,H,W]
-        B, S, C, H, W = x.shape
-        x = x.reshape(B * S, C, H, W)  # [N,C,H,W], N=B*S
+class PAEPFutureNet(nn.Module):
+    """
+    Single-step:
+      (I_ext[t], I_wrist[t], F_hist[t-L+1:t], pose[t]) -> logits over events at t+delta
+    """
+    def __init__(
+        self,
+        num_events: int = 6,
+        img_pretrained: bool = True,
+        img_feat_dim: int = 256,
+        force_k: int = 25,
+        force_feat_dim: int = 256,
+        proprio_dim: int = 128,
+        fusion_hidden: int = 256,
+    ):
+        super().__init__()
+        self.ext_enc = VisionEncoder(pretrained=img_pretrained, out_dim=img_feat_dim)
+        self.wrist_enc = VisionEncoder(pretrained=img_pretrained, out_dim=img_feat_dim)
 
-        N = x.shape[0]
-        mb = max(1, self.img_micro_batch)
-        feats = []
-        for i in range(0, N, mb):
-            xi = x[i:i+mb]
-            fi = backbone(xi)                 # [mb,512]
-            fi = F.relu(proj(fi), inplace=True)
-            feats.append(fi)
-        feat = torch.cat(feats, dim=0)        # [N,D]
-        return feat.reshape(B, S, -1)
+        self.force_enc = ForceEncoder(in_dim=6, conv_channels=128, force_k=force_k, gru_hidden=force_feat_dim)
+        self.prop_enc = ProprioEncoder(in_dim=9, out_dim=proprio_dim)
 
-    def forward(self, ext_img, wrist_img, wrench, tcp_pose):
-        ext = self._encode_img(self.ext_backbone, self.ext_proj, ext_img)
-        wrist = self._encode_img(self.wrist_backbone, self.wrist_proj, wrist_img)
-        f = self.force_enc(wrench)
-        p = self.proprio(tcp_pose)
+        in_dim = img_feat_dim * 2 + force_feat_dim + proprio_dim
+        self.fusion = nn.Sequential(
+            nn.Linear(in_dim, fusion_hidden),
+            nn.ReLU(inplace=True),
+            nn.Linear(fusion_hidden, fusion_hidden),
+            nn.ReLU(inplace=True),
+        )
+        self.head = nn.Linear(fusion_hidden, num_events)
 
-        fused = torch.cat([ext, wrist, f, p], dim=-1)
-        if self.use_fusion_gru:
-            fused, _ = self.fusion_gru(fused)
-        logits = self.head(fused)
+    def forward(
+        self,
+        ext_img: torch.Tensor,
+        wrist_img: torch.Tensor,
+        wrench_hist: torch.Tensor,
+        pose: torch.Tensor,
+        norm: Optional[Dict[str, torch.Tensor]] = None,
+        img_size: int = 224,
+    ) -> torch.Tensor:
+        # ext_img, wrist_img: (B,3,H,W) float
+        # wrench_hist: (B,L,6) float
+        # pose: (B,9)
+        if norm is not None:
+            wm, ws = norm["wrench_mean"], norm["wrench_std"]
+            pm, ps = norm["pose_mean"], norm["pose_std"]
+            wrench_hist = (wrench_hist - wm[None, None, :]) / ws[None, None, :]
+            pose = (pose - pm[None, :]) / ps[None, :]
+
+        v1 = self.ext_enc(ext_img, img_size=img_size)
+        v2 = self.wrist_enc(wrist_img, img_size=img_size)
+        f = self.force_enc(wrench_hist)
+        p = self.prop_enc(pose)
+
+        z = torch.cat([v1, v2, f, p], dim=-1)
+        h = self.fusion(z)
+        logits = self.head(h)
         return logits
+
+    def set_vision_trainable(self, trainable: bool):
+        for p in self.ext_enc.backbone.parameters():
+            p.requires_grad = trainable
+        for p in self.wrist_enc.backbone.parameters():
+            p.requires_grad = trainable

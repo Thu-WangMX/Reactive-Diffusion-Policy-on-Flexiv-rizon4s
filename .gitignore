@@ -23,6 +23,10 @@ __pycache__/
 *$py.class
 
 
+PAEP/paep_runs/
+PAEP/paep_runs_future/
+PAEP/paep_runs_future_v2/
+
 # Distribution / packaging
 .Python
 build/

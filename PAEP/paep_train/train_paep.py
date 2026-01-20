@@ -1,363 +1,374 @@
-# train_paep.py
+# PAEP/paep_train/train_paep.py
 import argparse
 import os
 import time
+from typing import Dict
+
 import numpy as np
 import torch
-import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from paep_dataset import PAEPZarrDataset, EVENT_NAMES
-from paep_model import PAEPNet
-
-try:
-    import wandb
-except Exception:
-    wandb = None
+from paep_dataset import PAEPFutureDataset, EVENT_NAMES, NUM_EVENTS, NormStats
+from paep_model import PAEPFutureNet
 
 
-def class_weights_from_counts(counts: dict):
-    total = sum(counts.values())
-    K = len(EVENT_NAMES)
-    w = []
-    for name in EVENT_NAMES:
-        c = max(1, counts.get(name, 1))
-        w.append(total / (K * c))
-    w = torch.tensor(w, dtype=torch.float32)
-    w = w / w.mean()
-    return w
+def compute_class_weights(class_counts: Dict[str, int]) -> torch.Tensor:
+    # inverse frequency with smoothing
+    counts = np.array([class_counts[n] for n in EVENT_NAMES], dtype=np.float64)
+    counts = np.maximum(counts, 1.0)
+    inv = 1.0 / counts
+    w = inv / inv.sum() * len(inv)
+    return torch.tensor(w, dtype=torch.float32)
+
+
+def confusion_matrix_np(y_true: np.ndarray, y_pred: np.ndarray, C: int) -> np.ndarray:
+    cm = np.zeros((C, C), dtype=np.int64)
+    for t, p in zip(y_true, y_pred):
+        cm[int(t), int(p)] += 1
+    return cm
+
+
+def per_class_prf(cm: np.ndarray):
+    out = {}
+    for c in range(cm.shape[0]):
+        tp = cm[c, c]
+        fp = cm[:, c].sum() - tp
+        fn = cm[c, :].sum() - tp
+        prec = float(tp / (tp + fp + 1e-9))
+        rec = float(tp / (tp + fn + 1e-9))
+        f1 = float((2 * prec * rec) / (prec + rec + 1e-9))
+        out[c] = {"precision": prec, "recall": rec, "f1": f1, "support": float(cm[c, :].sum())}
+    macro_f1 = float(np.mean([out[c]["f1"] for c in out.keys()]))
+    return out, macro_f1
 
 
 @torch.no_grad()
-def eval_one_epoch(model, dl, device, use_amp: bool):
+def eval_n(model, loader, device, norm_torch, img_size: int):
     model.eval()
-    total = 0
-    correct = 0
-    loss_sum = 0.0
-    ce = nn.CrossEntropyLoss()
-
-    for batch in dl:
-        ext = batch["external_img"].to(device, non_blocking=True)
+    total_loss, total_n = 0.0, 0
+    ys, ps = [], []
+    for batch in loader:
+        ext = batch["ext_img"].to(device, non_blocking=True)
         wrist = batch["wrist_img"].to(device, non_blocking=True)
-        wrench = batch["wrench"].to(device, non_blocking=True)
-        pose = batch["tcp_pose"].to(device, non_blocking=True)
-        y = batch["event"].to(device, non_blocking=True)
+        wrench = batch["wrench_hist"].to(device, non_blocking=True)
+        pose = batch["pose"].to(device, non_blocking=True)
+        y = batch["y"].to(device, non_blocking=True)
 
-        with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=use_amp):
-            logits = model(ext, wrist, wrench, pose)  # [B,S,C]
-            B, S, C = logits.shape
-            loss = ce(logits.reshape(B * S, C), y.reshape(B * S))
-
+        logits = model(ext, wrist, wrench, pose, norm=norm_torch, img_size=img_size)
+        loss = F.cross_entropy(logits, y)
         pred = logits.argmax(dim=-1)
-        correct += int((pred == y).sum().item())
-        total += int(y.numel())
-        loss_sum += float(loss.item()) * (B * S)
 
-    return loss_sum / max(1, total), correct / max(1, total)
+        total_loss += float(loss.item()) * y.shape[0]
+        total_n += int(y.shape[0])
 
+        ys.append(y.cpu().numpy())
+        ps.append(pred.cpu().numpy())
 
-def gpu_mem_gb():
-    if not torch.cuda.is_available():
-        return 0.0, 0.0
-    alloc = torch.cuda.memory_allocated() / 1024**3
-    peak = torch.cuda.max_memory_allocated() / 1024**3
-    return alloc, peak
+    y_true = np.concatenate(ys, axis=0)
+    y_pred = np.concatenate(ps, axis=0)
+    acc = float((y_true == y_pred).mean())
+    cm = confusion_matrix_np(y_true, y_pred, NUM_EVENTS)
+    prf, mf1 = per_class_prf(cm)
+    return total_loss / max(total_n, 1), acc, mf1, cm, prf
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--zarr_path", type=str, required=True)
-    ap.add_argument("--split_json", type=str, required=True)
-    ap.add_argument("--save_dir", type=str, default="./paep_runs")
 
-    ap.add_argument("--batch_size", type=int, default=6)
-    ap.add_argument("--segment_len", type=int, default=96)
+    ap.add_argument("--zarr_path", required=True)
+    ap.add_argument("--split_json", required=True)
+    ap.add_argument("--save_dir", required=True)
+
+    ap.add_argument("--force_hist", type=int, default=48)
+    ap.add_argument("--delta", type=int, default=6)
+    ap.add_argument("--force_k", type=int, default=25)
+
+    ap.add_argument("--batch_size", type=int, default=128)
     ap.add_argument("--samples_per_epoch", type=int, default=20000)
     ap.add_argument("--val_samples", type=int, default=4000)
     ap.add_argument("--epochs", type=int, default=20)
     ap.add_argument("--lr", type=float, default=3e-4)
-    ap.add_argument("--num_workers", type=int, default=4)
-    ap.add_argument("--device", type=str, default="cuda")
 
-    ap.add_argument("--img_pretrained", action="store_true")
-    ap.add_argument("--force_k", type=int, default=25)
-    ap.add_argument("--img_micro_batch", type=int, default=64)
+    ap.add_argument("--num_workers", type=int, default=0)
+    ap.add_argument("--pin_memory", action="store_true")
+    ap.add_argument("--device", default="cuda")
 
-    ap.add_argument("--seed", type=int, default=0)
-
-    # AMP + 梯度累积
     ap.add_argument("--amp", action="store_true")
-    ap.add_argument("--grad_accum", type=int, default=1)
+    ap.add_argument("--img_pretrained", action="store_true")
+    ap.add_argument("--img_size", type=int, default=224)
 
-    # tqdm / logging
-    ap.add_argument("--log_interval", type=int, default=50, help="steps between tqdm postfix updates AND wandb step logs")
-    ap.add_argument("--eval_every", type=int, default=1, help="eval every N epochs")
+    # improvements
+    ap.add_argument("--transition_sampling", action="store_true")
+    ap.add_argument("--transition_prob", type=float, default=0.7)
+    ap.add_argument("--transition_window", type=int, default=12)
 
-    # wandb
+    ap.add_argument("--freeze_vision_epochs", type=int, default=10)  # key
+    ap.add_argument("--early_stop_patience", type=int, default=5)
+
+    ap.add_argument("--log_every", type=int, default=50)
+
     ap.add_argument("--use_wandb", action="store_true")
-    ap.add_argument("--wandb_project", type=str, default="PAEP")
-    ap.add_argument("--wandb_name", type=str, default=None)
-    ap.add_argument("--wandb_mode", type=str, default="online", choices=["online", "offline", "disabled"])
+    ap.add_argument("--wandb_project", default="PAEP")
+    ap.add_argument("--wandb_name", default=None)
 
     args = ap.parse_args()
 
-    torch.manual_seed(args.seed)
-    np.random.seed(args.seed)
     os.makedirs(args.save_dir, exist_ok=True)
-
-    torch.backends.cudnn.benchmark = True
+    device = torch.device(args.device)
 
     # datasets
-    train_ds = PAEPZarrDataset(
+    train_ds = PAEPFutureDataset(
         args.zarr_path,
-        segment_len=args.segment_len,
-        samples_per_epoch=args.samples_per_epoch,
-        split_json=args.split_json,
-        split="train",
-        norm_stats=None,
-        norm_from_split="train",
-        norm_max_samples=None,
-        seed=args.seed,
+        args.split_json,
+        "train",
+        force_hist=args.force_hist,
+        delta=args.delta,
+        seed=0,
+        transition_sampling=args.transition_sampling,
+        transition_prob=args.transition_prob,
+        transition_window=args.transition_window,
+        compute_norm=True,
+        norm_samples=20000,
     )
-    val_ds = PAEPZarrDataset(
+    val_ds = PAEPFutureDataset(
         args.zarr_path,
-        segment_len=args.segment_len,
-        samples_per_epoch=args.val_samples,
-        split_json=args.split_json,
-        split="val",
-        norm_stats=train_ds.norm,
-        seed=args.seed + 1,
+        args.split_json,
+        "val",
+        force_hist=args.force_hist,
+        delta=args.delta,
+        seed=0,
+        transition_sampling=False,
+        compute_norm=False,
+        provided_norm=train_ds.norm,
     )
 
-    print("Train group:", train_ds.g_name)
+    print("Train group:", train_ds.group_name)
     print("Train class counts:", train_ds.class_counts)
     print("Val class counts:", val_ds.class_counts)
+    print(f"force_hist={args.force_hist}, delta={args.delta} (predict t+Δ), force_k={args.force_k}")
+    if args.transition_sampling:
+        print(f"transition_sampling=ON prob={args.transition_prob} window={args.transition_window}")
 
-    train_dl = DataLoader(
+    # dataloaders: we control steps/epoch by breaking after N steps
+    train_loader = DataLoader(
         train_ds,
-        batch_size=args.batch_size,
-        shuffle=True,
-        num_workers=args.num_workers,
-        pin_memory=True,
-        drop_last=True,
-        persistent_workers=(args.num_workers > 0),
-        prefetch_factor=2 if args.num_workers > 0 else None,
-    )
-    val_dl = DataLoader(
-        val_ds,
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.num_workers,
-        pin_memory=True,
-        drop_last=False,
-        persistent_workers=(args.num_workers > 0),
-        prefetch_factor=2 if args.num_workers > 0 else None,
+        pin_memory=args.pin_memory,
+        drop_last=True,
     )
 
-    model = PAEPNet(
-        num_events=len(EVENT_NAMES),
+    # val fixed-N wrapper
+    class _TakeN(torch.utils.data.Dataset):
+        def __init__(self, base, n): self.base, self.n = base, n
+        def __len__(self): return self.n
+        def __getitem__(self, i): return self.base[i]
+
+    val_take = _TakeN(val_ds, args.val_samples)
+    val_loader = DataLoader(
+        val_take,
+        batch_size=min(args.batch_size, 512),
+        shuffle=False,
+        num_workers=0,
+        pin_memory=False,
+    )
+
+    # model
+    model = PAEPFutureNet(
+        num_events=NUM_EVENTS,
         img_pretrained=args.img_pretrained,
-        img_feat_dim=256,
         force_k=args.force_k,
-        force_hidden=256,
-        proprio_dim=128,
-        fusion_hidden=256,
-        use_fusion_gru=True,
-        img_micro_batch=args.img_micro_batch,
-    ).to(args.device)
+    ).to(device)
 
-    w = class_weights_from_counts(train_ds.class_counts).to(args.device)
-    ce = nn.CrossEntropyLoss(weight=w)
-    opt = torch.optim.AdamW(model.parameters(), lr=args.lr)
+    # norm tensors
+    norm_torch = train_ds.norm.to_torch(device=device)
 
-    # ✅ AMP scaler (new API)
-    scaler = torch.amp.GradScaler("cuda", enabled=args.amp)
+    # weights
+    w = compute_class_weights(train_ds.class_counts).to(device)
 
     # wandb
     run = None
     if args.use_wandb:
-        if wandb is None:
-            raise ImportError("wandb is not installed. Please `pip install wandb`.")
-        run = wandb.init(
-            project=args.wandb_project,
-            name=args.wandb_name,
-            mode=args.wandb_mode,
-            config={
-                "zarr_path": args.zarr_path,
-                "split_json": args.split_json,
-                "batch_size": args.batch_size,
-                "segment_len": args.segment_len,
-                "samples_per_epoch": args.samples_per_epoch,
-                "val_samples": args.val_samples,
-                "epochs": args.epochs,
-                "lr": args.lr,
-                "force_k": args.force_k,
-                "img_pretrained": args.img_pretrained,
-                "img_micro_batch": args.img_micro_batch,
-                "amp": args.amp,
-                "grad_accum": args.grad_accum,
-                "seed": args.seed,
-                "train_class_counts": train_ds.class_counts,
-                "val_class_counts": val_ds.class_counts,
-                "log_interval": args.log_interval,
-            },
-        )
+        import wandb
+        run = wandb.init(project=args.wandb_project, name=args.wandb_name)
+        run.config.update(vars(args))
 
-    best_val = -1.0
+    def make_optimizer(vision_lr_mult=0.1):
+        # separate lr for vision backbone (optional smaller)
+        vision_params = []
+        other_params = []
+        for n, p in model.named_parameters():
+            if not p.requires_grad:
+                continue
+            if n.startswith("ext_enc.backbone") or n.startswith("wrist_enc.backbone"):
+                vision_params.append(p)
+            else:
+                other_params.append(p)
+        groups = [{"params": other_params, "lr": args.lr}]
+        if len(vision_params) > 0:
+            groups.append({"params": vision_params, "lr": args.lr * vision_lr_mult})
+        return torch.optim.AdamW(groups, weight_decay=1e-4)
+
+    # start with vision frozen (saves generalization)
+    if args.freeze_vision_epochs > 0:
+        model.set_vision_trainable(False)
+    optimizer = make_optimizer(vision_lr_mult=0.1)
+
+    # AMP
+    scaler = torch.amp.GradScaler("cuda", enabled=args.amp)
+    autocast = torch.amp.autocast
+
+    steps_per_epoch = int(np.ceil(args.samples_per_epoch / args.batch_size))
+
+    best_val_acc = -1.0
     best_epoch = -1
-    grad_accum = max(1, int(args.grad_accum))
+    best_val_mf1 = -1.0
+    patience_left = args.early_stop_patience
 
-    # global step for wandb curves
     global_step = 0
 
-    for ep in range(args.epochs):
+    for epoch in range(args.epochs):
+        # unfreeze vision after N epochs (optional)
+        if args.freeze_vision_epochs > 0 and epoch == args.freeze_vision_epochs:
+            model.set_vision_trainable(True)
+            optimizer = make_optimizer(vision_lr_mult=0.05)  # smaller lr for vision
+            print(f"[info] Unfroze vision at epoch {epoch}, recreated optimizer.")
+
         model.train()
-        opt.zero_grad(set_to_none=True)
-        torch.cuda.reset_peak_memory_stats()
-
-        loss_sum = 0.0
-        n_frames = 0
-        correct = 0
-        total = 0
-
         t0 = time.time()
+        loss_sum, correct, total = 0.0, 0, 0
 
-        pbar = tqdm(
-            enumerate(train_dl),
-            total=len(train_dl),
-            desc=f"Epoch {ep:03d}/{args.epochs-1}",
-            dynamic_ncols=True,
-        )
-
+        pbar = tqdm(enumerate(train_loader), total=steps_per_epoch, desc=f"Epoch {epoch:03d}/{args.epochs-1:03d}")
         for it, batch in pbar:
-            global_step += 1
+            if it >= steps_per_epoch:
+                break
 
-            ext = batch["external_img"].to(args.device, non_blocking=True)
-            wrist = batch["wrist_img"].to(args.device, non_blocking=True)
-            wrench = batch["wrench"].to(args.device, non_blocking=True)
-            pose = batch["tcp_pose"].to(args.device, non_blocking=True)
-            y = batch["event"].to(args.device, non_blocking=True)
+            ext = batch["ext_img"].to(device, non_blocking=True)
+            wrist = batch["wrist_img"].to(device, non_blocking=True)
+            wrench = batch["wrench_hist"].to(device, non_blocking=True)
+            pose = batch["pose"].to(device, non_blocking=True)
+            y = batch["y"].to(device, non_blocking=True)
 
-            with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=args.amp):
-                logits = model(ext, wrist, wrench, pose)  # [B,S,C]
-                B, S, C = logits.shape
-                loss = ce(logits.reshape(B * S, C), y.reshape(B * S))
-                loss_scaled = loss / grad_accum
+            optimizer.zero_grad(set_to_none=True)
 
-            scaler.scale(loss_scaled).backward()
+            with autocast(device_type="cuda", enabled=args.amp):
+                logits = model(ext, wrist, wrench, pose, norm=norm_torch, img_size=args.img_size)
+                loss = F.cross_entropy(logits, y, weight=w)
 
-            if (it + 1) % grad_accum == 0:
-                scaler.unscale_(opt)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                scaler.step(opt)
-                scaler.update()
-                opt.zero_grad(set_to_none=True)
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
 
-            # stats
-            loss_sum += float(loss.item()) * (B * S)
-            n_frames += (B * S)
             pred = logits.argmax(dim=-1)
             correct += int((pred == y).sum().item())
-            total += int(y.numel())
+            total += int(y.shape[0])
+            loss_sum += float(loss.item()) * y.shape[0]
 
-            # current running metrics
-            train_loss_now = loss_sum / max(1, n_frames)
-            train_acc_now = correct / max(1, total)
+            acc = correct / max(total, 1)
+            avg_loss = loss_sum / max(total, 1)
 
-            # tqdm + wandb step log every log_interval
-            if (it + 1) % args.log_interval == 0 or (it + 1) == len(train_dl):
-                alloc, peak = gpu_mem_gb()
-                pbar.set_postfix(
-                    loss=f"{train_loss_now:.4f}",
-                    acc=f"{train_acc_now:.3f}",
-                    mem=f"{alloc:.1f}G",
-                    peak=f"{peak:.1f}G",
-                )
-
+            if (global_step % args.log_every) == 0:
+                # GPU mem
+                mem_gb = torch.cuda.memory_allocated(device) / (1024**3)
+                peak_gb = torch.cuda.max_memory_allocated(device) / (1024**3)
+                pbar.set_postfix(loss=f"{avg_loss:.4f}", acc=f"{acc:.3f}", mem=f"{mem_gb:.1f}G", peak=f"{peak_gb:.1f}G")
                 if run is not None:
-                    wandb.log(
-                        {
-                            "step_train_loss": train_loss_now,
-                            "step_train_acc": train_acc_now,
-                            "gpu_mem_alloc_gb": alloc,
-                            "gpu_mem_peak_gb": peak,
-                            "lr": opt.param_groups[0]["lr"],
-                            "epoch": ep,
-                            "iter": it + 1,
-                        },
-                        step=global_step,
-                    )
+                    run.log({
+                        "train/loss": avg_loss,
+                        "train/acc": acc,
+                        "train/lr": optimizer.param_groups[0]["lr"],
+                        "gpu/mem_alloc_gb": mem_gb,
+                        "gpu/mem_peak_gb": peak_gb,
+                        "iter": global_step,
+                        "epoch": epoch,
+                    }, step=global_step)
 
-        # epoch metrics
-        train_loss = loss_sum / max(1, n_frames)
-        train_acc = correct / max(1, total)
+            global_step += 1
 
-        # eval
-        if (ep % args.eval_every) == 0:
-            val_loss, val_acc = eval_one_epoch(model, val_dl, args.device, use_amp=args.amp)
-        else:
-            val_loss, val_acc = float("nan"), float("nan")
+        train_loss = loss_sum / max(total, 1)
+        train_acc = correct / max(total, 1)
 
-        dt = time.time() - t0
-        alloc, peak = gpu_mem_gb()
+        # val
+        val_loss, val_acc, val_mf1, cm, prf = eval_n(model, val_loader, device, norm_torch, img_size=args.img_size)
 
-        print(f"[epoch {ep:03d}] "
-              f"train_loss={train_loss:.6f} train_acc={train_acc:.4f}  "
-              f"val_loss={val_loss:.6f} val_acc={val_acc:.4f}  "
-              f"time={dt:.1f}s mem={alloc:.2f}G peak={peak:.2f}G")
+        epoch_time = time.time() - t0
+        print(f"[epoch {epoch:03d}] train_loss={train_loss:.6f} train_acc={train_acc:.4f}  "
+              f"val_loss={val_loss:.6f} val_acc={val_acc:.4f} val_macroF1={val_mf1:.4f}  time={epoch_time:.1f}s")
 
-        # save ckpt
+        if run is not None:
+            # log epoch metrics
+            log = {
+                "epoch_train/loss": train_loss,
+                "epoch_train/acc": train_acc,
+                "epoch_val/loss": val_loss,
+                "epoch_val/acc": val_acc,
+                "epoch_val/macro_f1": val_mf1,
+                "epoch_time_sec": epoch_time,
+                "epoch": epoch,
+            }
+            run.log(log, step=global_step)
+
+            # per-class table
+            import wandb
+            table = wandb.Table(columns=["class", "precision", "recall", "f1", "support"])
+            for i, name in enumerate(EVENT_NAMES):
+                d = prf[i]
+                table.add_data(name, d["precision"], d["recall"], d["f1"], d["support"])
+            run.log({"epoch_val/per_class_prf": table}, step=global_step)
+
+            # confusion matrix as table
+            cm_table = wandb.Table(
+                columns=["true\\pred"] + EVENT_NAMES,
+                data=[[EVENT_NAMES[i]] + [int(cm[i, j]) for j in range(NUM_EVENTS)] for i in range(NUM_EVENTS)],
+            )
+            run.log({"epoch_val/confusion_matrix": cm_table}, step=global_step)
+
+        # save ckpt each epoch + best by val_macroF1 (or val_acc)
         ckpt = {
             "model": model.state_dict(),
-            "event_names": EVENT_NAMES,
+            "force_hist": args.force_hist,
+            "delta": args.delta,
             "force_k": args.force_k,
-            "segment_len": args.segment_len,
-            "train_counts": train_ds.class_counts,
-            "split_json": args.split_json,
+            "img_size": args.img_size,
             "norm": {
                 "wrench_mean": train_ds.norm.wrench_mean,
                 "wrench_std": train_ds.norm.wrench_std,
                 "pose_mean": train_ds.norm.pose_mean,
                 "pose_std": train_ds.norm.pose_std,
             },
-            "epoch": ep,
-            "train_loss": train_loss,
-            "train_acc": train_acc,
-            "val_loss": val_loss,
-            "val_acc": val_acc,
-            "amp": args.amp,
-            "img_micro_batch": args.img_micro_batch,
-            "grad_accum": grad_accum,
+            "eval_samples": max(args.val_samples, 10000),
         }
-        torch.save(ckpt, os.path.join(args.save_dir, f"paep_ep{ep:03d}.pt"))
+        torch.save(ckpt, os.path.join(args.save_dir, f"paep_future_ep{epoch:03d}.pt"))
 
-        if val_acc == val_acc and val_acc > best_val:  # guard NaN
-            best_val = val_acc
-            best_epoch = ep
-            torch.save(ckpt, os.path.join(args.save_dir, "paep_best.pt"))
+        improved = False
+        # Prefer macro-F1 as "best" (more fair for rare events)
+        if val_mf1 > best_val_mf1 + 1e-6:
+            best_val_mf1 = val_mf1
+            improved = True
+        if val_acc > best_val_acc + 1e-6:
+            best_val_acc = val_acc
+            best_epoch = epoch
 
-        # wandb epoch-level log (val curves)
-        if run is not None:
-            wandb.log(
-                {
-                    "epoch_train_loss": train_loss,
-                    "epoch_train_acc": train_acc,
-                    "val_loss": val_loss,
-                    "val_acc": val_acc,
-                    "epoch_time_sec": dt,
-                    "best_val_acc_so_far": best_val,
-                    "best_epoch_so_far": best_epoch,
-                },
-                step=global_step,
-            )
+        if improved:
+            torch.save(ckpt, os.path.join(args.save_dir, "best.pt"))
+            patience_left = args.early_stop_patience
+        else:
+            patience_left -= 1
 
-    print("Done. Best val acc:", best_val, "best epoch:", best_epoch)
+        if patience_left <= 0:
+            print(f"[early-stop] No improvement for {args.early_stop_patience} epochs. Stop at epoch {epoch}.")
+            break
 
     if run is not None:
-        run.summary["best_val_acc"] = best_val
-        run.summary["best_epoch"] = best_epoch
+        run.summary["best_val_acc"] = best_val_acc
+        run.summary["best_val_macro_f1"] = best_val_mf1
+        run.summary["best_epoch_acc"] = best_epoch
         run.finish()
+
+    print("Done. best_val_acc:", best_val_acc, "best_val_macro_f1:", best_val_mf1, "best_epoch_acc:", best_epoch)
 
 
 if __name__ == "__main__":
