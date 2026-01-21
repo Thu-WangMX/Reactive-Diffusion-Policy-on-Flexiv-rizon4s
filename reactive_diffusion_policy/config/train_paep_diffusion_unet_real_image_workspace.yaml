@@ -162,29 +162,29 @@ ema:
 
 dataloader:
   # ResNet
-  #batch_size: 64
-  batch_size: 1
+  batch_size: 32
+  #batch_size: 1
   # timm
   # batch_size: 32
-  #num_workers: 8
-  num_workers: 0
+  num_workers: 8
+  #num_workers: 0
   shuffle: True
   pin_memory: True
-  #persistent_workers: True
-  persistent_workers: False
+  persistent_workers: True
+  #persistent_workers: False
 
 val_dataloader:
   # ResNet
-  #batch_size: 64
-  batch_size: 1
+  batch_size: 32
+  #batch_size: 1
   # timm
   # batch_size: 32
-  #num_workers: 8
-  num_workers: 0
+  num_workers: 8
+  #num_workers: 0
   shuffle: False
   pin_memory: True
-  #persistent_workers: True
-  persistent_workers: False
+  persistent_workers: True
+  #persistent_workers: False
 
 optimizer:
   _target_: torch.optim.AdamW
@@ -199,7 +199,7 @@ training:
   device: "cuda"
   seed: 42
   debug: False
-  resume: True
+  resume: False
   # optimization
   lr_scheduler: cosine
   lr_warmup_steps: 500
@@ -226,7 +226,7 @@ training:
 
 logging:
   project: paep_gated_diffusion_policy
-  resume: True
+  resume: False
   mode: online
   name: ${now:%Y.%m.%d-%H.%M.%S}_${name}_${task_name}
   tags: ["${name}", "${task_name}", "${exp_name}"]

@@ -448,9 +448,24 @@ class PAEPGatedDiffusionUnetImageForcePolicy(BaseImagePolicy):
             **self.kwargs,
         )
 
-        naction_pred = nsample[:, : self.n_action_steps]  # (B,Ta,Da)
-        action_pred = self.normalizer["action"].unnormalize(naction_pred)
-        return {"action": action_pred}
+        # naction_pred = nsample[:, : self.n_action_steps]  # (B,Ta,Da)
+        # action_pred = self.normalizer["action"].unnormalize(naction_pred)
+        # #return {"action": action_pred}
+        # return {
+        #         "action": action_pred,
+        #         "action_pred": action_pred
+        #     }
+        action_pred_full = self.normalizer["action"].unnormalize(nsample)
+        
+        # 2. 拿到截取后的 15 步动作 (保留你原有的逻辑，用于实际执行)
+        naction_pred_sliced = nsample[:, : self.n_action_steps]
+        action_executed = self.normalizer["action"].unnormalize(naction_pred_sliced)
+
+        return {
+            "action": action_executed,       # 15步 (给机器人用的)
+            "action_pred": action_pred_full  # 16步 (给Workspace算分用的)
+        }
+        # === 修复结束 ===
 
     # ========= training =========
     def compute_loss(self, batch) -> torch.Tensor:
