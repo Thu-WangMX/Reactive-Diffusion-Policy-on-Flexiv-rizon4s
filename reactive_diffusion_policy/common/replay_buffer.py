@@ -143,6 +143,68 @@ class ReplayBuffer:
         return cls.create_from_group(group, **kwargs)
     
     # ============= copy constructors ===============
+    # @classmethod
+    # def copy_from_store(cls, src_store, store=None, keys=None, 
+    #         chunks: Dict[str,tuple]=dict(), 
+    #         compressors: Union[dict, str, numcodecs.abc.Codec]=dict(), 
+    #         if_exists='replace',
+    #         **kwargs):
+    #     """
+    #     Load to memory.
+    #     """
+    #     src_root = zarr.group(src_store)
+    #     root = None
+    #     if store is None:
+    #         # numpy backend
+    #         meta = dict()
+    #         for key, value in src_root['meta'].items():
+    #             if len(value.shape) == 0:
+    #                 meta[key] = np.array(value)
+    #             else:
+    #                 meta[key] = value[:]
+
+    #         if keys is None:
+    #             keys = src_root['data'].keys()
+    #         data = dict()
+    #         for key in keys:
+    #             arr = src_root['data'][key]
+    #             data[key] = arr[:]
+
+    #         root = {
+    #             'meta': meta,
+    #             'data': data
+    #         }
+    #     else:
+    #         root = zarr.group(store=store)
+    #         # copy without recompression
+    #         n_copied, n_skipped, n_bytes_copied = zarr.copy_store(source=src_store, dest=store,
+    #             source_path='/meta', dest_path='/meta', if_exists=if_exists)
+    #         data_group = root.create_group('data', overwrite=True)
+    #         if keys is None:
+    #             keys = src_root['data'].keys()
+    #         for key in keys:
+    #             value = src_root['data'][key]
+    #             cks = cls._resolve_array_chunks(
+    #                 chunks=chunks, key=key, array=value)
+    #             cpr = cls._resolve_array_compressor(
+    #                 compressors=compressors, key=key, array=value)
+    #             if cks == value.chunks and cpr == value.compressor:
+    #                 # copy without recompression
+    #                 this_path = '/data/' + key
+    #                 n_copied, n_skipped, n_bytes_copied = zarr.copy_store(
+    #                     source=src_store, dest=store,
+    #                     source_path=this_path, dest_path=this_path,
+    #                     if_exists=if_exists
+    #                 )
+    #             else:
+    #                 # copy with recompression
+    #                 n_copied, n_skipped, n_bytes_copied = zarr.copy(
+    #                     source=value, dest=data_group, name=key,
+    #                     chunks=cks, compressor=cpr, if_exists=if_exists
+    #                 )
+    #     buffer = cls(root=root)
+    #     return buffer
+
     @classmethod
     def copy_from_store(cls, src_store, store=None, keys=None, 
             chunks: Dict[str,tuple]=dict(), 
@@ -157,18 +219,36 @@ class ReplayBuffer:
         if store is None:
             # numpy backend
             meta = dict()
+            # === 修复第一处：保护 meta 循环 ===
             for key, value in src_root['meta'].items():
-                if len(value.shape) == 0:
-                    meta[key] = np.array(value)
-                else:
-                    meta[key] = value[:]
+                try:
+                    # 如果没有 shape 属性（说明是文件夹），直接跳过
+                    if not hasattr(value, 'shape'):
+                        continue
+                        
+                    if len(value.shape) == 0:
+                        meta[key] = np.array(value)
+                    else:
+                        meta[key] = value[:]
+                except Exception:
+                    continue
+            # =================================
 
             if keys is None:
                 keys = src_root['data'].keys()
             data = dict()
+            # === 修复第二处：保护 data 循环 ===
             for key in keys:
-                arr = src_root['data'][key]
-                data[key] = arr[:]
+                try:
+                    arr = src_root['data'][key]
+                    # 如果没有 shape 属性（说明是文件夹），直接跳过
+                    if not hasattr(arr, 'shape'):
+                        continue
+                        
+                    data[key] = arr[:]
+                except Exception:
+                    continue
+            # =================================
 
             root = {
                 'meta': meta,
@@ -183,25 +263,33 @@ class ReplayBuffer:
             if keys is None:
                 keys = src_root['data'].keys()
             for key in keys:
-                value = src_root['data'][key]
-                cks = cls._resolve_array_chunks(
-                    chunks=chunks, key=key, array=value)
-                cpr = cls._resolve_array_compressor(
-                    compressors=compressors, key=key, array=value)
-                if cks == value.chunks and cpr == value.compressor:
-                    # copy without recompression
-                    this_path = '/data/' + key
-                    n_copied, n_skipped, n_bytes_copied = zarr.copy_store(
-                        source=src_store, dest=store,
-                        source_path=this_path, dest_path=this_path,
-                        if_exists=if_exists
-                    )
-                else:
-                    # copy with recompression
-                    n_copied, n_skipped, n_bytes_copied = zarr.copy(
-                        source=value, dest=data_group, name=key,
-                        chunks=cks, compressor=cpr, if_exists=if_exists
-                    )
+                # === 修复第三处：保护 Zarr Backend 循环 ===
+                try:
+                    value = src_root['data'][key]
+                    if not hasattr(value, 'shape'):
+                        continue
+
+                    cks = cls._resolve_array_chunks(
+                        chunks=chunks, key=key, array=value)
+                    cpr = cls._resolve_array_compressor(
+                        compressors=compressors, key=key, array=value)
+                    if cks == value.chunks and cpr == value.compressor:
+                        # copy without recompression
+                        this_path = '/data/' + key
+                        n_copied, n_skipped, n_bytes_copied = zarr.copy_store(
+                            source=src_store, dest=store,
+                            source_path=this_path, dest_path=this_path,
+                            if_exists=if_exists
+                        )
+                    else:
+                        # copy with recompression
+                        n_copied, n_skipped, n_bytes_copied = zarr.copy(
+                            source=value, dest=data_group, name=key,
+                            chunks=cks, compressor=cpr, if_exists=if_exists
+                        )
+                except Exception:
+                    continue
+                # ========================================
         buffer = cls(root=root)
         return buffer
     
