@@ -28,6 +28,11 @@ policy:
   force_hist: 48
   wrench_hist_key: wrench_hist
   pose_key: left_robot_tcp_pose
+  gripper_key: left_robot_gripper_width
+  zero_proprio_in_obs_encoder: true
+  # contact_class_ids: [2,3,4]   # 先不改，仍 exclude approach
+  # paep_prob_smooth: false      # 先不加
+  
 
   # ---- PAEP checkpoint ----
   paep_ckpt: /home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/PAEP/paep_runs_future_v2/paep_future_ep006.pt
@@ -36,6 +41,8 @@ policy:
   contact_class_ids: [2, 3, 4]
   gmin: 0.05
   freeze_paep: True
+
+  
   
   noise_scheduler:
     _target_: diffusers.schedulers.scheduling_ddim.DDIMScheduler
@@ -162,29 +169,24 @@ ema:
 
 dataloader:
   # ResNet
-  batch_size: 32
-  #batch_size: 1
+  batch_size: 64
   # timm
   # batch_size: 32
-  num_workers: 8
-  #num_workers: 0
+  num_workers: 10
   shuffle: True
   pin_memory: True
   persistent_workers: True
-  #persistent_workers: False
 
 val_dataloader:
   # ResNet
-  batch_size: 32
-  #batch_size: 1
+  batch_size: 64
   # timm
   # batch_size: 32
-  num_workers: 8
-  #num_workers: 0
+  num_workers: 10
   shuffle: False
   pin_memory: True
   persistent_workers: True
-  #persistent_workers: False
+
 
 optimizer:
   _target_: torch.optim.AdamW

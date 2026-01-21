@@ -1,15 +1,3 @@
-# ============================================================
-# PAEP-Gated Diffusion Unet Image+Force Policy (FULL, FIXED + W&B DEBUG)
-# - Fix crash: NEVER use `if k in self.normalizer` (LinearNormalizer lacks __contains__)
-# - Fix: set_normalizer() now .to(device)
-# - Fix: compute_loss() restores scheduler.prediction_type + mask + masked MSE reduction
-# - Fix: PAEP input restores ImageNet normalize + uses ckpt norm dict (as in v1 that ran)
-# - W&B logging:
-#   * every `log_wandb_every` steps: g_contact mean/min/max, paep entropy/maxprob, argmax dist (bar)
-#   * cross-attn/force injection stats: delta_norm_mean, inj_ratio_mean, etc.
-#   * IMPORTANT PERF FIX: NO .item() in forward() (avoid GPU sync each step)
-# ============================================================
-
 from typing import Dict, Union, Optional, Sequence, Tuple
 import math
 
@@ -27,45 +15,44 @@ from reactive_diffusion_policy.model.vision.multi_image_obs_encoder import Multi
 from reactive_diffusion_policy.model.vision.timm_obs_encoder import TimmObsEncoder
 from reactive_diffusion_policy.common.pytorch_util import dict_apply
 
-# ---- PAEP robust import ----
+# ---- PAEP ----
+# robust import: works if paep_model.py is at repo root OR under PAEP/
 import importlib.util
 from pathlib import Path
-
 
 def _load_paep_future_net():
     """
     Robustly load PAEPFutureNet regardless of PYTHONPATH / package layout.
     We search repo_root/PAEP for a python file that defines PAEPFutureNet.
     """
+    # reactive_diffusion_policy/policy/... -> repo_root is two parents up
     repo_root = Path(__file__).resolve().parents[2]
     paep_dir = repo_root / "PAEP"
 
+    # common candidates first
     candidates = [
         paep_dir / "paep_model.py",
         paep_dir / "models" / "paep_model.py",
     ]
-
+    # fallback: search any .py under PAEP that contains "PAEPFutureNet"
     if paep_dir.exists():
         for p in paep_dir.rglob("*.py"):
             if p.name.startswith("__"):
                 continue
-            try:
-                txt = p.read_text(encoding="utf-8", errors="ignore")
-            except Exception:
-                continue
-            if "PAEPFutureNet" in txt:
-                candidates.append(p)
+            candidates.append(p)
 
     for p in candidates:
         if not p.exists():
             continue
         try:
+            text = p.read_text(encoding="utf-8", errors="ignore")
+            if "PAEPFutureNet" not in text:
+                continue
             spec = importlib.util.spec_from_file_location("paep_dyn", str(p))
             mod = importlib.util.module_from_spec(spec)
             assert spec and spec.loader
             spec.loader.exec_module(mod)
             if hasattr(mod, "PAEPFutureNet"):
-                print(f"[PAEP] Loaded PAEPFutureNet from: {p}")
                 return getattr(mod, "PAEPFutureNet"), str(p)
         except Exception:
             continue
@@ -75,8 +62,8 @@ def _load_paep_future_net():
         f"Make sure PAEPFutureNet is defined in some .py file under PAEP/."
     )
 
-
 PAEPFutureNet, _PAEP_SRC = _load_paep_future_net()
+print(f"[PAEP] Loaded PAEPFutureNet from: {_PAEP_SRC}")
 
 
 def imagenet_normalize(x: torch.Tensor) -> torch.Tensor:
@@ -93,11 +80,9 @@ def imagenet_normalize(x: torch.Tensor) -> torch.Tensor:
         raise ValueError(f"Unexpected x.dim={x.dim()}")
 
 
-# ============================================================
-# Head-wise cross attention with per-head gating
-# ============================================================
 class HeadWiseCrossAttention(nn.Module):
     """
+    Minimal multi-head cross-attn with per-head gating.
     Q: (B, Nq, D)   usually Nq=1
     KV: (B, Nk, D)
     gate_h: (B, H) in [0,1]
@@ -113,9 +98,6 @@ class HeadWiseCrossAttention(nn.Module):
         self.v_proj = nn.Linear(d_model, d_model)
         self.out_proj = nn.Linear(d_model, d_model)
         self.drop = nn.Dropout(dropout)
-
-        # debug cache (tensors only; no .item() here!)
-        self._last_attn_debug = None
 
     def forward(self, q: torch.Tensor, kv: torch.Tensor, gate_h: torch.Tensor) -> torch.Tensor:
         B, Nq, D = q.shape
@@ -133,33 +115,19 @@ class HeadWiseCrossAttention(nn.Module):
 
         out = torch.matmul(w, vh)  # (B,H,Nq,dh)
 
-        # per-head gate inside attention
+        # per-head gate
         out = out * gate_h[:, :, None, None]
 
         out = out.transpose(1, 2).contiguous().view(B, Nq, D)  # (B,Nq,D)
-        y = self.out_proj(out)
-
-        # ---- debug (tensors only, no sync) ----
-        with torch.no_grad():
-            # gate stats
-            self._last_attn_debug = {
-                "g_head_mean": gate_h.mean().detach(),
-                "g_head_min": gate_h.min().detach(),
-                "g_head_max": gate_h.max().detach(),
-                # attention sharpness: max weight and entropy over Nk
-                "attn_max_mean": w.max(dim=-1).values.mean().detach(),  # (B,H,Nq)->scalar
-                "attn_entropy_mean": (-(w.clamp_min(1e-9).log() * w).sum(dim=-1)).mean().detach(),
-            }
-
-        return y
+        return self.out_proj(out)
 
 
-# ============================================================
-# Dual-gated vision-force fusion
-#   - head gate inside attn
-#   - contact gate scales whole residual
-# ============================================================
 class DualGatedVisionForceFusion(nn.Module):
+    """
+    V_t (vision/proprio feature) is the anchor.
+    F_hist_t -> force tokens.
+    PAEP prob -> (g_contact scalar) and (g_head vector).
+    """
     def __init__(
         self,
         d_model: int,
@@ -174,22 +142,15 @@ class DualGatedVisionForceFusion(nn.Module):
         self.n_heads = n_heads
         self.force_tokens = force_tokens
 
-        self.force_proj = nn.Sequential(
-            nn.Linear(force_token_dim, d_model),
-            nn.ReLU(inplace=True),
-            nn.Linear(d_model, d_model),
-        )
-
+        self.force_proj = nn.Linear(force_token_dim, d_model)
         self.cross_attn = HeadWiseCrossAttention(d_model=d_model, n_heads=n_heads, dropout=dropout)
 
+        # head-wise gate from PAEP prob
         self.head_gate_mlp = nn.Sequential(
             nn.Linear(6, gate_hidden),
             nn.ReLU(inplace=True),
             nn.Linear(gate_hidden, n_heads),
         )
-
-        # debug cache (tensors only)
-        self._last_fusion_debug = None
 
     def forward(
         self,
@@ -205,28 +166,13 @@ class DualGatedVisionForceFusion(nn.Module):
         f_tok = self.force_proj(wrench_hist)        # (B,L,D)
 
         g_head = torch.sigmoid(self.head_gate_mlp(paep_prob))   # (B,H)
+        g_head = g_head * g_contact[:, None]                    # (B,H)
 
         delta = self.cross_attn(v_tok, f_tok, g_head)           # (B,1,D)
-        v_fused = v_tok + (g_contact[:, None, None] * delta)    # scalar contact switch
-
-        # ---- debug (tensors only, no .item() / no sync) ----
-        with torch.no_grad():
-            dn = delta.squeeze(1).norm(dim=-1)                  # (B,)
-            vn = v_feat.norm(dim=-1)                            # (B,)
-            inj = (g_contact * dn)                              # (B,)
-            self._last_fusion_debug = {
-                "delta_norm_mean": dn.mean().detach(),
-                "v_norm_mean": vn.mean().detach(),
-                "inj_norm_mean": inj.mean().detach(),
-                "inj_ratio_mean": (inj / (vn + 1e-6)).mean().detach(),
-            }
-
+        v_fused = v_tok + delta                                 # residual
         return v_fused.squeeze(1)                               # (B,D)
 
 
-# ============================================================
-# Policy
-# ============================================================
 class PAEPGatedDiffusionUnetImageForcePolicy(BaseImagePolicy):
     def __init__(
         self,
@@ -249,16 +195,12 @@ class PAEPGatedDiffusionUnetImageForcePolicy(BaseImagePolicy):
         force_hist: int = 48,
         wrench_hist_key: str = "wrench_hist",
         pose_key: str = "left_robot_tcp_pose",
-        gripper_key: str = "left_robot_gripper_width",
-        zero_proprio_in_obs_encoder: bool = True,
         # paep
-        paep_ckpt: Optional[str] = None,
+        paep_ckpt: Optional[str] = None,   # torch.load ckpt that contains {"model":..., "norm":...}
         paep_img_size: int = 224,
-        contact_class_ids: Sequence[int] = (2, 3, 4),  # under/effective/over
+        contact_class_ids: Sequence[int] = (2, 3, 4),  # under/effective/over (exclude approach)
         gmin: float = 0.05,
         freeze_paep: bool = True,
-        # logging
-        log_wandb_every: int = 30,   # recommended default (per-epoch a few logs)
         **kwargs,
     ):
         super().__init__()
@@ -284,7 +226,7 @@ class PAEPGatedDiffusionUnetImageForcePolicy(BaseImagePolicy):
             n_groups=n_groups,
             cond_predict_scale=cond_predict_scale,
         )
-        self._extra_step_log = None
+
         self.obs_encoder = obs_encoder
         self.noise_scheduler = noise_scheduler
         self.mask_generator = LowdimMaskGenerator(
@@ -308,25 +250,9 @@ class PAEPGatedDiffusionUnetImageForcePolicy(BaseImagePolicy):
             num_inference_steps = noise_scheduler.config.num_train_timesteps
         self.num_inference_steps = num_inference_steps
 
-        # ---- logging ----
-        self.log_wandb_every = int(log_wandb_every)
-        self._train_step = 0
-        self._last_debug = None
-
-        # fusion + proprio
+        # fusion
         self.wrench_hist_key = wrench_hist_key
         self.pose_key = pose_key
-        self.gripper_key = gripper_key
-        self.zero_proprio_in_obs_encoder = bool(zero_proprio_in_obs_encoder)
-
-        # proprioception: tcp_pose(9) + gripper_width(1) = 10D
-        self.proprio_dim = 10
-        self.proprio_mlp = nn.Sequential(
-            nn.Linear(self.proprio_dim, obs_feature_dim),
-            nn.ReLU(inplace=True),
-            nn.Linear(obs_feature_dim, obs_feature_dim),
-        )
-
         self.fusion = DualGatedVisionForceFusion(
             d_model=obs_feature_dim,
             n_heads=n_heads,
@@ -338,7 +264,7 @@ class PAEPGatedDiffusionUnetImageForcePolicy(BaseImagePolicy):
 
         # PAEP
         self.paep = PAEPFutureNet(num_events=6, img_pretrained=False)
-        self.paep_img_size = int(paep_img_size)
+        self.paep_img_size = paep_img_size
         self.contact_class_ids = tuple(int(x) for x in contact_class_ids)
         self.gmin = float(gmin)
 
@@ -352,64 +278,37 @@ class PAEPGatedDiffusionUnetImageForcePolicy(BaseImagePolicy):
             self.paep.load_state_dict(ckpt["model"], strict=True)
             norm = ckpt.get("norm", None)
             if norm is not None:
-                self._paep_wm.copy_(torch.as_tensor(norm["wrench_mean"]).float())
-                self._paep_ws.copy_(torch.as_tensor(norm["wrench_std"]).float())
-                self._paep_pm.copy_(torch.as_tensor(norm["pose_mean"]).float())
-                self._paep_ps.copy_(torch.as_tensor(norm["pose_std"]).float())
+                self._paep_wm.copy_(torch.tensor(norm["wrench_mean"], dtype=torch.float32))
+                self._paep_ws.copy_(torch.tensor(norm["wrench_std"], dtype=torch.float32))
+                self._paep_pm.copy_(torch.tensor(norm["pose_mean"], dtype=torch.float32))
+                self._paep_ps.copy_(torch.tensor(norm["pose_std"], dtype=torch.float32))
 
         if freeze_paep:
             for p in self.paep.parameters():
                 p.requires_grad_(False)
             self.paep.eval()
 
-    # ------------------------------------------------------------
-    # Normalizer helpers (CRASH FIX: never use `k in self.normalizer`)
-    # ------------------------------------------------------------
-    def _has_norm_key(self, k: str) -> bool:
-        return isinstance(k, str) and hasattr(self.normalizer, "params_dict") and (k in self.normalizer.params_dict)
-
     def set_normalizer(self, normalizer):
+        """
+        normalizer: LinearNormalizer from dataset.get_normalizer()
+        We copy state_dict into self.normalizer to keep module reference stable.
+        """
         if normalizer is None:
             return
-        if isinstance(normalizer, LinearNormalizer):
+        # copy parameters/buffers
+        try:
             self.normalizer.load_state_dict(normalizer.state_dict())
-        elif isinstance(normalizer, dict):
-            self.normalizer.load_state_dict(normalizer)
-        else:
-            try:
-                self.normalizer.load_state_dict(normalizer.state_dict())
-            except Exception:
-                self.normalizer = normalizer
-
-        self.normalizer.to(next(self.parameters()).device)
-
-    # ------------------------------------------------------------
-    # obs split: raw vs dp-normalized
-    # ------------------------------------------------------------
-    def _split_raw_and_dp_obs(
-        self, obs: Dict[str, torch.Tensor]
-    ) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
-        obs_raw: Dict[str, torch.Tensor] = {}
-        obs_dp: Dict[str, torch.Tensor] = {}
-
-        for k, v in obs.items():
-            # RAW
-            if torch.is_tensor(v) and v.dtype == torch.uint8:
-                obs_raw[k] = v.float() / 255.0
+        except Exception:
+            # fallback: allow passing a plain dict
+            if isinstance(normalizer, dict):
+                self.normalizer.load_state_dict(normalizer)
             else:
-                obs_raw[k] = v
+                raise
+         # ✅ 关键：确保 normalizer 在同一个 device
+        device = next(self.parameters()).device
+        self.normalizer.to(device)
 
-            # DP-normalized
-            if isinstance(k, str) and self._has_norm_key(k):
-                obs_dp[k] = self.normalizer[k].normalize(v)
-            else:
-                obs_dp[k] = v if v.dtype != torch.uint8 else (v.float() / 255.0)
 
-        return obs_raw, obs_dp
-
-    # ------------------------------------------------------------
-    # PAEP helpers
-    # ------------------------------------------------------------
     def _paep_norm_dict(self, device, dtype):
         return {
             "wrench_mean": self._paep_wm.to(device=device, dtype=dtype),
@@ -418,24 +317,33 @@ class PAEPGatedDiffusionUnetImageForcePolicy(BaseImagePolicy):
             "pose_std": self._paep_ps.to(device=device, dtype=dtype),
         }
 
-    @torch.no_grad()
-    def _run_paep(
-        self,
-        ext_img: torch.Tensor,       # (B,3,H,W) float in [0,1]
-        wrist_img: torch.Tensor,     # (B,3,H,W) float in [0,1]
-        wrench_hist: torch.Tensor,   # (B,L,6) RAW
-        pose: torch.Tensor,          # (B,9) RAW
-    ) -> torch.Tensor:
-        if ext_img.shape[-1] != self.paep_img_size or ext_img.shape[-2] != self.paep_img_size:
-            ext_img = F.interpolate(ext_img, size=(self.paep_img_size, self.paep_img_size),
-                                    mode="bilinear", align_corners=False)
-        if wrist_img.shape[-1] != self.paep_img_size or wrist_img.shape[-2] != self.paep_img_size:
-            wrist_img = F.interpolate(wrist_img, size=(self.paep_img_size, self.paep_img_size),
-                                      mode="bilinear", align_corners=False)
+    def _normalize_obs_safe(self, obs_dict):
+        obs_wo = {k: v for k, v in obs_dict.items() if k != self.wrench_hist_key}
+        nobs = self.normalizer.normalize(obs_wo)
 
+        # ✅ 关键：保证输出跟输入/模型同 device
+        device = next(self.parameters()).device
+        nobs = dict_apply(nobs, lambda x: x.to(device) if torch.is_tensor(x) else x)
+        return nobs
+
+    def _split_raw_and_dp_obs(self, obs_dict: Dict[str, torch.Tensor]) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
+        """
+        obs_raw: original inputs (images in [0,1], pose raw, wrench_hist raw)
+        obs_dp:  DP-normalized version (for obs_encoder / UNet)
+        """
+        obs_raw = obs_dict
+        obs_dp = self._normalize_obs_safe(obs_dict)
+        return obs_raw, obs_dp
+
+    @torch.no_grad()
+    def _run_paep(self, ext_img, wrist_img, wrench_hist, pose):
+        """
+        ext_img/wrist_img: (B,3,H,W) float in [0,1]  (RAW)
+        wrench_hist: (B,L,6)  (RAW)
+        pose: (B,9)  (RAW)
+        """
         ext_n = imagenet_normalize(ext_img)
         wrist_n = imagenet_normalize(wrist_img)
-
         norm = self._paep_norm_dict(device=ext_img.device, dtype=ext_img.dtype)
 
         logits = self.paep(
@@ -450,44 +358,34 @@ class PAEPGatedDiffusionUnetImageForcePolicy(BaseImagePolicy):
         g = prob[:, list(self.contact_class_ids)].sum(dim=-1)  # (B,)
         return torch.clamp(g, min=self.gmin, max=1.0)
 
-    # ------------------------------------------------------------
-    # Encode fused obs
-    # ------------------------------------------------------------
     def _encode_fused_obs(self, obs_raw: Dict[str, torch.Tensor], obs_dp: Dict[str, torch.Tensor]) -> torch.Tensor:
-        any_v = next(v for v in obs_dp.values() if torch.is_tensor(v))
-        B = any_v.shape[0]
+        """
+        Return fused obs features for first n_obs_steps:
+          (B, n_obs_steps, D)
+        """
+        B = next(iter(obs_dp.values())).shape[0]
         To = self.n_obs_steps
 
-        ext_raw = obs_raw["external_img"][:, :To]
-        wrist_raw = obs_raw["left_wrist_img"][:, :To]
-        wrench_hist_raw = obs_raw[self.wrench_hist_key][:, :To]
-        pose_raw = obs_raw[self.pose_key][:, :To]
+        # RAW for PAEP + force KV
+        ext_raw = obs_raw["external_img"][:, :To]       # (B,To,3,H,W) in [0,1]
+        wrist_raw = obs_raw["left_wrist_img"][:, :To]   # (B,To,3,H,W) in [0,1]
+        wrench_hist_raw = obs_raw[self.wrench_hist_key][:, :To]  # (B,To,L,6) raw
+        pose_raw = obs_raw[self.pose_key][:, :To]                 # (B,To,9) raw
 
+        # DP-normalized for vision encoder (DP-consistent)
         exclude = {self.wrench_hist_key}
         enc_nobs = {k: v[:, :To] for k, v in obs_dp.items() if (k not in exclude)}
-
-        if self.zero_proprio_in_obs_encoder:
-            if self.pose_key in enc_nobs:
-                enc_nobs[self.pose_key] = torch.zeros_like(enc_nobs[self.pose_key])
-            if self.gripper_key in enc_nobs:
-                enc_nobs[self.gripper_key] = torch.zeros_like(enc_nobs[self.gripper_key])
 
         flat_nobs = dict_apply(enc_nobs, lambda x: x.reshape(-1, *x.shape[2:]))
         v_feat = self.obs_encoder(flat_nobs)  # (B*To, D)
 
         flat_ext = ext_raw.reshape(-1, *ext_raw.shape[2:])
         flat_wrist = wrist_raw.reshape(-1, *wrist_raw.shape[2:])
-        flat_wrench = wrench_hist_raw.reshape(-1, *wrench_hist_raw.shape[2:])
-        flat_pose = pose_raw.reshape(-1, *pose_raw.shape[2:])
+        flat_wrench = wrench_hist_raw.reshape(-1, *wrench_hist_raw.shape[2:])  # (B*To,L,6)
+        flat_pose = pose_raw.reshape(-1, *pose_raw.shape[2:])                  # (B*To,9)
 
         paep_prob = self._run_paep(flat_ext, flat_wrist, flat_wrench, flat_pose)  # (B*To,6)
         g_contact = self._compute_g_contact(paep_prob)                             # (B*To,)
-
-        with torch.no_grad():
-            self._last_debug = {
-                "g_contact": g_contact.detach(),
-                "paep_prob": paep_prob.detach(),
-            }
 
         v_fused = self.fusion(
             v_feat=v_feat,
@@ -496,25 +394,9 @@ class PAEPGatedDiffusionUnetImageForcePolicy(BaseImagePolicy):
             paep_prob=paep_prob,
         )  # (B*To,D)
 
-        if (self.pose_key not in obs_dp) or (self.gripper_key not in obs_dp):
-            raise KeyError(
-                f"Missing proprio keys in obs_dp. Need '{self.pose_key}' and '{self.gripper_key}'. "
-                f"Got keys={list(obs_dp.keys())}"
-            )
+        return v_fused.reshape(B, To, -1)
 
-        proprio = torch.cat(
-            [obs_dp[self.pose_key][:, :To], obs_dp[self.gripper_key][:, :To]],
-            dim=-1
-        )  # (B,To,10)
-        proprio_flat = proprio.reshape(-1, proprio.shape[-1])
-        proprio_emb = self.proprio_mlp(proprio_flat)  # (B*To,D)
-
-        fused = v_fused + proprio_emb
-        return fused.reshape(B, To, -1)
-
-    # ------------------------------------------------------------
-    # Diffusion sampling
-    # ------------------------------------------------------------
+    # ========= inference =========
     def conditional_sample(
         self,
         condition_data, condition_mask,
@@ -542,24 +424,22 @@ class PAEPGatedDiffusionUnetImageForcePolicy(BaseImagePolicy):
         trajectory[condition_mask] = condition_data[condition_mask]
         return trajectory
 
-    # ------------------------------------------------------------
-    # Inference
-    # ------------------------------------------------------------
     def predict_action(self, obs_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         obs_raw, obs_dp = self._split_raw_and_dp_obs(obs_dict)
-        any_v = next(v for v in obs_dp.values() if torch.is_tensor(v))
-        B = any_v.shape[0]
+        B = next(iter(obs_dp.values())).shape[0]
+        To = self.n_obs_steps
 
         if not self.obs_as_global_cond:
             raise NotImplementedError("Keep obs_as_global_cond=True for now (DP-consistent).")
 
         fused = self._encode_fused_obs(obs_raw, obs_dp)   # (B,To,D)
-        global_cond = fused.reshape(B, -1)
+        global_cond = fused.reshape(B, -1)                # (B, To*D)
 
-        cond_data = torch.zeros((B, self.horizon, self.action_dim),
-                                device=global_cond.device, dtype=global_cond.dtype)
-        condition_mask = self.mask_generator(cond_data.shape).to(cond_data.device)
+        nactions = torch.zeros((B, self.horizon, self.action_dim), device=global_cond.device, dtype=global_cond.dtype)
+        cond_data = nactions.detach()
+        trajectory = cond_data
 
+        condition_mask = self.mask_generator(trajectory.shape)
         nsample = self.conditional_sample(
             condition_data=cond_data,
             condition_mask=condition_mask,
@@ -568,39 +448,53 @@ class PAEPGatedDiffusionUnetImageForcePolicy(BaseImagePolicy):
             **self.kwargs,
         )
 
+        # naction_pred = nsample[:, : self.n_action_steps]  # (B,Ta,Da)
+        # action_pred = self.normalizer["action"].unnormalize(naction_pred)
+        # #return {"action": action_pred}
+        # return {
+        #         "action": action_pred,
+        #         "action_pred": action_pred
+        #     }
         action_pred_full = self.normalizer["action"].unnormalize(nsample)
-        action_executed = self.normalizer["action"].unnormalize(nsample[:, : self.n_action_steps])
+        
+        # 2. 拿到截取后的 15 步动作 (保留你原有的逻辑，用于实际执行)
+        naction_pred_sliced = nsample[:, : self.n_action_steps]
+        action_executed = self.normalizer["action"].unnormalize(naction_pred_sliced)
 
-        return {"action": action_executed, "action_pred": action_pred_full}
+        return {
+            "action": action_executed,       # 15步 (给机器人用的)
+            "action_pred": action_pred_full  # 16步 (给Workspace算分用的)
+        }
+        # === 修复结束 ===
 
-    # ------------------------------------------------------------
-    # Training loss + W&B log
-    # ------------------------------------------------------------
-    
+    # ========= training =========
     def compute_loss(self, batch) -> torch.Tensor:
         obs = batch["obs"]
         action = batch["action"]
 
         obs_raw, obs_dp = self._split_raw_and_dp_obs(obs)
         nactions = self.normalizer["action"].normalize(action)
-        B = nactions.shape[0]
+
+        B = action.shape[0]
 
         if not self.obs_as_global_cond:
-            raise NotImplementedError("obs_as_global_cond=False not supported for this policy.")
+            raise NotImplementedError("Keep obs_as_global_cond=True for now (DP-consistent).")
 
-        fused = self._encode_fused_obs(obs_raw, obs_dp)
+        fused = self._encode_fused_obs(obs_raw, obs_dp)   # (B,To,D)
         global_cond = fused.reshape(B, -1)
-
         trajectory = nactions
-        noise = torch.randn_like(trajectory)
+
+        condition_mask = self.mask_generator(trajectory.shape)
+        noise = torch.randn(trajectory.shape, device=trajectory.device)
+        bsz = trajectory.shape[0]
         timesteps = torch.randint(
             0, self.noise_scheduler.config.num_train_timesteps,
-            (B,), device=trajectory.device
+            (bsz,), device=trajectory.device
         ).long()
 
         noisy_trajectory = self.noise_scheduler.add_noise(trajectory, noise, timesteps)
 
-        condition_mask = self.mask_generator(trajectory.shape).to(trajectory.device)
+        loss_mask = ~condition_mask
         noisy_trajectory[condition_mask] = trajectory[condition_mask]
 
         pred = self.model(noisy_trajectory, timesteps, local_cond=None, global_cond=global_cond)
@@ -613,68 +507,10 @@ class PAEPGatedDiffusionUnetImageForcePolicy(BaseImagePolicy):
         else:
             raise ValueError(f"Unsupported prediction type {pred_type}")
 
-        loss_mask = ~condition_mask
         loss = F.mse_loss(pred, target, reduction="none")
         loss = loss * loss_mask.type(loss.dtype)
         loss = reduce(loss, "b ... -> b (...)", "mean").mean()
-
-        # ---------------------------
-        # ✅ extra logs (JSON only)
-        #   - do NOT call wandb.* here
-        #   - do NOT specify step here
-        #   - workspace will merge into step_log and log with self.global_step
-        # ---------------------------
-        self._train_step += 1
-
-        is_main = (not torch.distributed.is_available()) or \
-                (not torch.distributed.is_initialized()) or \
-                (torch.distributed.get_rank() == 0)
-
-        if is_main and (self.log_wandb_every > 0) and (self._train_step % self.log_wandb_every == 0) and (self._last_debug is not None):
-            dbg = self._last_debug
-            gc = dbg["g_contact"]  # (B*To,)
-            pp = dbg["paep_prob"]  # (B*To,6)
-
-            with torch.no_grad():
-                paep_entropy = (-(pp * (pp.clamp_min(1e-9)).log()).sum(dim=-1)).mean()
-                paep_maxprob_mean = pp.max(dim=-1).values.mean()
-
-                # argmax distribution (store as list[float], JSON-safe)
-                argmax = pp.argmax(dim=-1)
-                counts = torch.bincount(argmax, minlength=pp.shape[-1]).float()
-                counts = (counts / counts.sum().clamp_min(1.0))
-
-            log_dict = {
-                # 注意：这里不要放 wandb.Table / wandb.plot
-                "debug/g_contact_mean": float(gc.mean().detach().cpu()),
-                "debug/g_contact_min": float(gc.min().detach().cpu()),
-                "debug/g_contact_max": float(gc.max().detach().cpu()),
-                "debug/paep_entropy": float(paep_entropy.detach().cpu()),
-                "debug/paep_maxprob_mean": float(paep_maxprob_mean.detach().cpu()),
-                "debug/paep_argmax_ratio": counts.detach().cpu().tolist(),  # JSON list
-            }
-
-            # fusion debug (JSON-safe scalars)
-            fd = getattr(self.fusion, "_last_fusion_debug", None)
-            if isinstance(fd, dict):
-                for k in ["delta_norm_mean", "inj_norm_mean", "inj_ratio_mean", "v_norm_mean"]:
-                    if k in fd:
-                        log_dict[f"debug/fusion_{k}"] = float(fd[k].detach().cpu())
-
-            # attn debug (JSON-safe scalars)
-            ad = getattr(self.fusion.cross_attn, "_last_attn_debug", None)
-            if isinstance(ad, dict):
-                for k in ["g_head_mean", "g_head_min", "g_head_max", "attn_max_mean", "attn_entropy_mean"]:
-                    if k in ad:
-                        log_dict[f"debug/attn_{k}"] = float(ad[k].detach().cpu())
-
-            # 可选：把 loss 也塞进 extra（不强制）
-            log_dict["debug/loss_train"] = float(loss.detach().cpu())
-
-            # merge point for workspace
-            self._extra_step_log = log_dict
-
         return loss
 
-    def forward(self, batch, **kwargs):
-        return self.compute_loss(batch, **kwargs)
+    def forward(self, batch):
+        return self.compute_loss(batch)
