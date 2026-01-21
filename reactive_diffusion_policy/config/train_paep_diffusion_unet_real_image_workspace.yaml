@@ -1,5 +1,5 @@
 defaults:
-  - task: wmx_real_wiping_board_paep_dp_absolute_24fps
+  - task: wmx_paep_real_wiping_board_image_dp_absolute_24fps
   - _self_
 
 name: train_paep_diffusion_unet_image_force
@@ -162,23 +162,29 @@ ema:
 
 dataloader:
   # ResNet
-  batch_size: 64
+  #batch_size: 64
+  batch_size: 1
   # timm
   # batch_size: 32
-  num_workers: 8
+  #num_workers: 8
+  num_workers: 0
   shuffle: True
   pin_memory: True
-  persistent_workers: True
+  #persistent_workers: True
+  persistent_workers: False
 
 val_dataloader:
   # ResNet
-  batch_size: 64
+  #batch_size: 64
+  batch_size: 1
   # timm
   # batch_size: 32
-  num_workers: 8
+  #num_workers: 8
+  num_workers: 0
   shuffle: False
   pin_memory: True
-  persistent_workers: True
+  #persistent_workers: True
+  persistent_workers: False
 
 optimizer:
   _target_: torch.optim.AdamW

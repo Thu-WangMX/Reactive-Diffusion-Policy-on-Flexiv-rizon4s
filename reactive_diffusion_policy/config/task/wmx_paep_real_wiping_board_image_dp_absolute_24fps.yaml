@@ -121,6 +121,16 @@ dataset:
   shape_meta: *shape_meta
   dataset_path: ${task.dataset_path}
 
+  # ---- dynamic wrench history (for PAEP + fusion) ----
+  add_wrench_hist: true
+  force_hist: 48
+  wrench_key: left_robot_tcp_wrench
+  wrench_hist_key: wrench_hist
+  wrench_hist_pad_mode: repeat_first
+
+  # make dataset sampling consistent with 24Hz (no downsample)
+  obs_temporal_downsample_ratio: 1
+
   horizon: ${horizon}
   pad_before: ${eval:'${dataset_obs_steps}-1+${n_latency_steps}'}
   pad_after: ${eval:'${n_action_steps}-1'}

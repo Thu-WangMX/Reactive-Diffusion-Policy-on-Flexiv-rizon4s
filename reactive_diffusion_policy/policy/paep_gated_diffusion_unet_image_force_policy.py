@@ -1,5 +1,4 @@
-# reactive_diffusion_policy/policy/paep_gated_diffusion_unet_image_force_policy.py
-from typing import Dict, Union, Optional, Sequence
+from typing import Dict, Union, Optional, Sequence, Tuple
 import math
 
 import torch
@@ -17,8 +16,54 @@ from reactive_diffusion_policy.model.vision.timm_obs_encoder import TimmObsEncod
 from reactive_diffusion_policy.common.pytorch_util import dict_apply
 
 # ---- PAEP ----
-# adjust import path to wherever you placed paep_model.py
-from paep_model import PAEPFutureNet
+# robust import: works if paep_model.py is at repo root OR under PAEP/
+import importlib.util
+from pathlib import Path
+
+def _load_paep_future_net():
+    """
+    Robustly load PAEPFutureNet regardless of PYTHONPATH / package layout.
+    We search repo_root/PAEP for a python file that defines PAEPFutureNet.
+    """
+    # reactive_diffusion_policy/policy/... -> repo_root is two parents up
+    repo_root = Path(__file__).resolve().parents[2]
+    paep_dir = repo_root / "PAEP"
+
+    # common candidates first
+    candidates = [
+        paep_dir / "paep_model.py",
+        paep_dir / "models" / "paep_model.py",
+    ]
+    # fallback: search any .py under PAEP that contains "PAEPFutureNet"
+    if paep_dir.exists():
+        for p in paep_dir.rglob("*.py"):
+            if p.name.startswith("__"):
+                continue
+            candidates.append(p)
+
+    for p in candidates:
+        if not p.exists():
+            continue
+        try:
+            text = p.read_text(encoding="utf-8", errors="ignore")
+            if "PAEPFutureNet" not in text:
+                continue
+            spec = importlib.util.spec_from_file_location("paep_dyn", str(p))
+            mod = importlib.util.module_from_spec(spec)
+            assert spec and spec.loader
+            spec.loader.exec_module(mod)
+            if hasattr(mod, "PAEPFutureNet"):
+                return getattr(mod, "PAEPFutureNet"), str(p)
+        except Exception:
+            continue
+
+    raise ModuleNotFoundError(
+        f"Cannot find PAEPFutureNet under {paep_dir}. "
+        f"Make sure PAEPFutureNet is defined in some .py file under PAEP/."
+    )
+
+PAEPFutureNet, _PAEP_SRC = _load_paep_future_net()
+print(f"[PAEP] Loaded PAEPFutureNet from: {_PAEP_SRC}")
 
 
 def imagenet_normalize(x: torch.Tensor) -> torch.Tensor:
@@ -33,7 +78,6 @@ def imagenet_normalize(x: torch.Tensor) -> torch.Tensor:
         return (x - mean.unsqueeze(0)) / std.unsqueeze(0)
     else:
         raise ValueError(f"Unexpected x.dim={x.dim()}")
-    
 
 
 class HeadWiseCrossAttention(nn.Module):
@@ -122,7 +166,7 @@ class DualGatedVisionForceFusion(nn.Module):
         f_tok = self.force_proj(wrench_hist)        # (B,L,D)
 
         g_head = torch.sigmoid(self.head_gate_mlp(paep_prob))   # (B,H)
-        g_head = g_head * g_contact[:, None]                    # (B,H) dual-gate merge
+        g_head = g_head * g_contact[:, None]                    # (B,H)
 
         delta = self.cross_attn(v_tok, f_tok, g_head)           # (B,1,D)
         v_fused = v_tok + delta                                 # residual
@@ -154,13 +198,12 @@ class PAEPGatedDiffusionUnetImageForcePolicy(BaseImagePolicy):
         # paep
         paep_ckpt: Optional[str] = None,   # torch.load ckpt that contains {"model":..., "norm":...}
         paep_img_size: int = 224,
-        contact_class_ids: Sequence[int] = (2, 3, 4),  # approach, under, effective, over
+        contact_class_ids: Sequence[int] = (2, 3, 4),  # under/effective/over (exclude approach)
         gmin: float = 0.05,
         freeze_paep: bool = True,
         **kwargs,
     ):
         super().__init__()
-        # shapes
         action_shape = shape_meta["action"]["shape"]
         assert len(action_shape) == 1
         action_dim = action_shape[0]
@@ -207,7 +250,7 @@ class PAEPGatedDiffusionUnetImageForcePolicy(BaseImagePolicy):
             num_inference_steps = noise_scheduler.config.num_train_timesteps
         self.num_inference_steps = num_inference_steps
 
-        # fusion module
+        # fusion
         self.wrench_hist_key = wrench_hist_key
         self.pose_key = pose_key
         self.fusion = DualGatedVisionForceFusion(
@@ -220,12 +263,11 @@ class PAEPGatedDiffusionUnetImageForcePolicy(BaseImagePolicy):
         )
 
         # PAEP
-        self.paep = PAEPFutureNet(num_events=6, img_pretrained=False)  # exact arch weights come from ckpt
+        self.paep = PAEPFutureNet(num_events=6, img_pretrained=False)
         self.paep_img_size = paep_img_size
         self.contact_class_ids = tuple(int(x) for x in contact_class_ids)
         self.gmin = float(gmin)
 
-        # norm buffers (filled after loading ckpt)
         self.register_buffer("_paep_wm", torch.zeros(6), persistent=False)
         self.register_buffer("_paep_ws", torch.ones(6), persistent=False)
         self.register_buffer("_paep_pm", torch.zeros(9), persistent=False)
@@ -246,6 +288,27 @@ class PAEPGatedDiffusionUnetImageForcePolicy(BaseImagePolicy):
                 p.requires_grad_(False)
             self.paep.eval()
 
+    def set_normalizer(self, normalizer):
+        """
+        normalizer: LinearNormalizer from dataset.get_normalizer()
+        We copy state_dict into self.normalizer to keep module reference stable.
+        """
+        if normalizer is None:
+            return
+        # copy parameters/buffers
+        try:
+            self.normalizer.load_state_dict(normalizer.state_dict())
+        except Exception:
+            # fallback: allow passing a plain dict
+            if isinstance(normalizer, dict):
+                self.normalizer.load_state_dict(normalizer)
+            else:
+                raise
+         # ✅ 关键：确保 normalizer 在同一个 device
+        device = next(self.parameters()).device
+        self.normalizer.to(device)
+
+
     def _paep_norm_dict(self, device, dtype):
         return {
             "wrench_mean": self._paep_wm.to(device=device, dtype=dtype),
@@ -253,25 +316,32 @@ class PAEPGatedDiffusionUnetImageForcePolicy(BaseImagePolicy):
             "pose_mean": self._paep_pm.to(device=device, dtype=dtype),
             "pose_std": self._paep_ps.to(device=device, dtype=dtype),
         }
-    
+
     def _normalize_obs_safe(self, obs_dict):
-        wh = obs_dict.get(self.wrench_hist_key, None)
         obs_wo = {k: v for k, v in obs_dict.items() if k != self.wrench_hist_key}
         nobs = self.normalizer.normalize(obs_wo)
-        if wh is not None:
-            nobs[self.wrench_hist_key] = wh  # keep raw
+
+        # ✅ 关键：保证输出跟输入/模型同 device
+        device = next(self.parameters()).device
+        nobs = dict_apply(nobs, lambda x: x.to(device) if torch.is_tensor(x) else x)
         return nobs
 
+    def _split_raw_and_dp_obs(self, obs_dict: Dict[str, torch.Tensor]) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
+        """
+        obs_raw: original inputs (images in [0,1], pose raw, wrench_hist raw)
+        obs_dp:  DP-normalized version (for obs_encoder / UNet)
+        """
+        obs_raw = obs_dict
+        obs_dp = self._normalize_obs_safe(obs_dict)
+        return obs_raw, obs_dp
 
     @torch.no_grad()
     def _run_paep(self, ext_img, wrist_img, wrench_hist, pose):
         """
-        ext_img/wrist_img: (B,3,H,W) float in [0,1] (dataset gives /255)
-        wrench_hist: (B,L,6)
-        pose: (B,9)
-        return prob: (B,6)
+        ext_img/wrist_img: (B,3,H,W) float in [0,1]  (RAW)
+        wrench_hist: (B,L,6)  (RAW)
+        pose: (B,9)  (RAW)
         """
-        # match infer_stream preprocessing: imagenet normalize then PAEP resizes inside encoder
         ext_n = imagenet_normalize(ext_img)
         wrist_n = imagenet_normalize(wrist_img)
         norm = self._paep_norm_dict(device=ext_img.device, dtype=ext_img.dtype)
@@ -285,44 +355,37 @@ class PAEPGatedDiffusionUnetImageForcePolicy(BaseImagePolicy):
         return prob
 
     def _compute_g_contact(self, prob: torch.Tensor) -> torch.Tensor:
-        # prob: (B,6)
         g = prob[:, list(self.contact_class_ids)].sum(dim=-1)  # (B,)
         return torch.clamp(g, min=self.gmin, max=1.0)
 
-    def _encode_fused_obs(self, nobs: Dict[str, torch.Tensor]) -> torch.Tensor:
+    def _encode_fused_obs(self, obs_raw: Dict[str, torch.Tensor], obs_dp: Dict[str, torch.Tensor]) -> torch.Tensor:
         """
         Return fused obs features for first n_obs_steps:
           (B, n_obs_steps, D)
         """
-        B = next(iter(nobs.values())).shape[0]
+        B = next(iter(obs_dp.values())).shape[0]
         To = self.n_obs_steps
 
-        # ---- prepare per-step tensors ----
-        # images
-        ext = nobs["external_img"][:, :To]      # (B,To,3,H,W)
-        wrist = nobs["left_wrist_img"][:, :To]  # (B,To,3,H,W)
+        # RAW for PAEP + force KV
+        ext_raw = obs_raw["external_img"][:, :To]       # (B,To,3,H,W) in [0,1]
+        wrist_raw = obs_raw["left_wrist_img"][:, :To]   # (B,To,3,H,W) in [0,1]
+        wrench_hist_raw = obs_raw[self.wrench_hist_key][:, :To]  # (B,To,L,6) raw
+        pose_raw = obs_raw[self.pose_key][:, :To]                 # (B,To,9) raw
 
-        # wrench_hist
-        wrench_hist = nobs[self.wrench_hist_key][:, :To]  # (B,To,L,6)
-        pose = nobs[self.pose_key][:, :To]                # (B,To,9)
-
-        # ---- obs_encoder features (DP-consistent) ----
-        # IMPORTANT: do NOT pass wrench_hist to obs_encoder
+        # DP-normalized for vision encoder (DP-consistent)
         exclude = {self.wrench_hist_key}
-        enc_nobs = {k: v[:, :To] for k, v in nobs.items() if (k not in exclude)}
+        enc_nobs = {k: v[:, :To] for k, v in obs_dp.items() if (k not in exclude)}
 
-        # reshape B,To -> (B*To, ...)
         flat_nobs = dict_apply(enc_nobs, lambda x: x.reshape(-1, *x.shape[2:]))
         v_feat = self.obs_encoder(flat_nobs)  # (B*To, D)
 
-        # ---- PAEP gating + fusion ----
-        flat_ext = ext.reshape(-1, *ext.shape[2:])
-        flat_wrist = wrist.reshape(-1, *wrist.shape[2:])
-        flat_wrench = wrench_hist.reshape(-1, *wrench_hist.shape[2:])  # (B*To,L,6)
-        flat_pose = pose.reshape(-1, *pose.shape[2:])                  # (B*To,9)
+        flat_ext = ext_raw.reshape(-1, *ext_raw.shape[2:])
+        flat_wrist = wrist_raw.reshape(-1, *wrist_raw.shape[2:])
+        flat_wrench = wrench_hist_raw.reshape(-1, *wrench_hist_raw.shape[2:])  # (B*To,L,6)
+        flat_pose = pose_raw.reshape(-1, *pose_raw.shape[2:])                  # (B*To,9)
 
         paep_prob = self._run_paep(flat_ext, flat_wrist, flat_wrench, flat_pose)  # (B*To,6)
-        g_contact = self._compute_g_contact(paep_prob)                              # (B*To,)
+        g_contact = self._compute_g_contact(paep_prob)                             # (B*To,)
 
         v_fused = self.fusion(
             v_feat=v_feat,
@@ -362,20 +425,15 @@ class PAEPGatedDiffusionUnetImageForcePolicy(BaseImagePolicy):
         return trajectory
 
     def predict_action(self, obs_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        # normalize
-        #nobs = self.normalizer.normalize(obs_dict)
-        nobs = self._normalize_obs_safe(obs_dict)
-        B = next(iter(nobs.values())).shape[0]
+        obs_raw, obs_dp = self._split_raw_and_dp_obs(obs_dict)
+        B = next(iter(obs_dp.values())).shape[0]
         To = self.n_obs_steps
 
-        global_cond = None
-        local_cond = None
-
-        if self.obs_as_global_cond:
-            fused = self._encode_fused_obs(nobs)          # (B,To,D)
-            global_cond = fused.reshape(B, -1)            # (B, To*D)
-        else:
+        if not self.obs_as_global_cond:
             raise NotImplementedError("Keep obs_as_global_cond=True for now (DP-consistent).")
+
+        fused = self._encode_fused_obs(obs_raw, obs_dp)   # (B,To,D)
+        global_cond = fused.reshape(B, -1)                # (B, To*D)
 
         nactions = torch.zeros((B, self.horizon, self.action_dim), device=global_cond.device, dtype=global_cond.dtype)
         cond_data = nactions.detach()
@@ -385,14 +443,13 @@ class PAEPGatedDiffusionUnetImageForcePolicy(BaseImagePolicy):
         nsample = self.conditional_sample(
             condition_data=cond_data,
             condition_mask=condition_mask,
-            local_cond=local_cond,
+            local_cond=None,
             global_cond=global_cond,
             **self.kwargs,
         )
 
         naction_pred = nsample[:, : self.n_action_steps]  # (B,Ta,Da)
         action_pred = self.normalizer["action"].unnormalize(naction_pred)
-
         return {"action": action_pred}
 
     # ========= training =========
@@ -400,22 +457,17 @@ class PAEPGatedDiffusionUnetImageForcePolicy(BaseImagePolicy):
         obs = batch["obs"]
         action = batch["action"]
 
-        #nobs = self.normalizer.normalize(obs)
-        nobs = self._normalize_obs_safe(obs)
+        obs_raw, obs_dp = self._split_raw_and_dp_obs(obs)
         nactions = self.normalizer["action"].normalize(action)
 
         B = action.shape[0]
-        horizon = action.shape[1]
 
-        global_cond = None
-        local_cond = None
-
-        if self.obs_as_global_cond:
-            fused = self._encode_fused_obs(nobs)          # (B,To,D)
-            global_cond = fused.reshape(B, -1)
-            trajectory = nactions
-        else:
+        if not self.obs_as_global_cond:
             raise NotImplementedError("Keep obs_as_global_cond=True for now (DP-consistent).")
+
+        fused = self._encode_fused_obs(obs_raw, obs_dp)   # (B,To,D)
+        global_cond = fused.reshape(B, -1)
+        trajectory = nactions
 
         condition_mask = self.mask_generator(trajectory.shape)
         noise = torch.randn(trajectory.shape, device=trajectory.device)
@@ -430,7 +482,7 @@ class PAEPGatedDiffusionUnetImageForcePolicy(BaseImagePolicy):
         loss_mask = ~condition_mask
         noisy_trajectory[condition_mask] = trajectory[condition_mask]
 
-        pred = self.model(noisy_trajectory, timesteps, local_cond=local_cond, global_cond=global_cond)
+        pred = self.model(noisy_trajectory, timesteps, local_cond=None, global_cond=global_cond)
 
         pred_type = self.noise_scheduler.config.prediction_type
         if pred_type == "epsilon":
