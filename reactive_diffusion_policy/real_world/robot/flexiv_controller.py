@@ -7,7 +7,7 @@ import sys
 # sys.path.insert(0, flexivrdk_root_path+"/lib_py")
 import flexivrdk
 # sys.path.insert(0, flexivrdk_root_path+"/example_py")
-
+import numpy as np
 import time
 from typing import List
 from loguru import logger
@@ -43,7 +43,7 @@ class FlexivController:
         self.frequency = frequency
         print(robot_sn)
         print(gripper_name)
-        print(1111111122)
+        #print(1111111122)
         try:
             
             self.robot_states = flexivrdk.RobotStates()
@@ -54,11 +54,11 @@ class FlexivController:
             
             #self.mode = flexivrdk.Mode(flexivrdk.Mode.NRT_CARTESIAN_MOTION_FORCE)
             self.mode = flexivrdk.Mode
-            print(1111111122333)
+            #print(1111111122333)
             
             self.robot = flexivrdk.Robot(self.robot_sn)
  
-            print(222222)
+            #print(222222)
 
             if remote_control:
                 
@@ -109,6 +109,9 @@ class FlexivController:
                 
                 #self.log.info("Left robot is now operational")
                 self.robot.SwitchMode(self.mode.NRT_CARTESIAN_MOTION_FORCE) 
+                # self.robot.SetForceControlFrame(flexivrdk.CoordType.TCP)
+                # self.robot.SetForceControlAxis([False, False, True, False, False, False])
+                # self.robot.SetMaxContactWrench([float("inf")] * 6)
                 print("已成功设置为笛卡尔力控模式")
         except Exception as e:
             #self.log.error("Error occurred while connecting to robot server: %s" % str(e))
@@ -189,57 +192,53 @@ class FlexivController:
         
     def quat2eulerZYX(quat, degree=True):
         print("quat",quat)
-        print(979797979)
         eulerZYX = (
             R.from_quat([quat[3], quat[0], quat[1], quat[2]])
             .as_euler("xyz", degrees=degree)
             .tolist()
         )
-        print(979797979)
         return eulerZYX
+    
+    def fix_quat_continuity(q, q_prev=None, eps=1e-12):
+        q = np.asarray(q, dtype=np.float64)
+        n = np.linalg.norm(q)
+        if n < eps:
+            return q_prev if q_prev is not None else np.array([1.0, 0.0, 0.0, 0.0])  # 建议默认 [w,x,y,z]
+        q = q / n
+        if q_prev is not None and np.dot(q_prev, q) < 0:
+            q = -q
+        return q
             
     def tcp_move(self, target_tcp):
         
-        pos = target_tcp[:3]
-        quat = target_tcp[3:]  
-        # target_tcp[3:] = [0.01265409 , 0.00165955,  0.99990422, -0.00534991]
-        #print("quat",target_tcp[3:])
-        #self.robot.SwitchMode(self.mode.NRT_CARTESIAN_MOTION_FORCE)
-        #print("机械臂正在tcp_move")
+        # 四元数顺序：w,x,y,z
+        # target_tcp = np.asarray(target_tcp, dtype=np.float64)
+        # pos = target_tcp[:3]
+        # quat = target_tcp[3:7]
+        # quat = self.fix_quat_continuity(quat, getattr(self, "_prev_quat", None))
+        # self._prev_quat = quat.copy()
+        # target_tcp[3:7] = quat
+        # # target_tcp[3:] = [0.01265409 , 0.00165955,  0.99990422, -0.00534991]
+
+        # #开启非夕底层力控
+        # self.robot.SetForceControlFrame(flexivrdk.CoordType.TCP)
+        # self.robot.SetForceControlAxis([False, False, True, False, False, False])
+        # self.robot.SetMaxContactWrench([float("inf")] * 6)
+        # self.robot.SendCartesianMotionForce(
+        #         target_tcp, 
+        #         [0.0, 0.0, -10.0, 0.0, 0.0, 0.0],
+        #         0.05)
+        #         #1.0)
+        
+        # #不开启非夕底层力控
         self.robot.SendCartesianMotionForce(
                 target_tcp, 
                 [0.0]*6, 
-                #[0.0, 0.0, 10.0, 0.0, 0.0, 0.0],
-                0.7)
+                0.1)
                 #1.0)
-        print("机械臂执行一次tcp_move")
+        print("机械臂执行一次tcp_move,目标tcp:",target_tcp)
         
-    # def tcp_move(self, target_tcp):
-    #     # target_tcp: [x, y, z, q0, q1, q2, q3]
-    #     pos = target_tcp[:3]
-    #     quat = target_tcp[3:]  # 注意这里的顺序要和 quat2eulerZYX 要求的 [w,x,y,z] 对齐
-    #     print("quat",quat)
-    #     print(6868686868686868)
-    #     # 如果你的 target_tcp 存的是 [x,y,z,w]，那就直接传：
-        
-    #     eulerZYX = (
-    #         R.from_quat([quat[0], quat[1], quat[2], quat[3]])
-    #         .as_euler("xyz", degrees=True)
-    #         .tolist()
-    #     )
-    #     print("eulerZYX",eulerZYX)
-    #     print(979797979)
-        
-    #     #euler_deg = self.quat2eulerZYX(quat, degree=True)
-    #     #print("euler_deg",euler_deg)
-    #     #print(6868686868686868)
-    #     # 防御式：确保已经切到 Primitive 模式
-    #     self.switch_PRIMITIVE_Mode()
 
-    #     # 用 MoveL 做一次性直线运动
-    #     self.MoveL(pos, eulerZYX, speed=0.01, acc=0.1)
-
-    
     
     def MovePTP(self,position,euler, jntVelScale=20):
         """

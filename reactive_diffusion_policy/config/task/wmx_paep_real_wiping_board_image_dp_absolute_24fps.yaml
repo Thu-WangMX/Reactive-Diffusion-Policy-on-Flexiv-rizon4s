@@ -44,11 +44,11 @@ shape_meta: &shape_meta
 
 
 env_runner:
-  _target_: reactive_diffusion_policy.env_runner.real_runner.RealRunner
+  _target_: reactive_diffusion_policy.env_runner.ours_real_runner.RealRunner
   eval_episodes: 10
   max_duration_time: 300
-  tcp_action_update_interval: 8
-  gripper_action_update_interval: 8
+  tcp_action_update_interval: 6
+  gripper_action_update_interval: 6
   # tcp_action_update_interval: 2
   # gripper_action_update_interval: 2
   tcp_pos_clip_range:
@@ -58,11 +58,11 @@ env_runner:
     - [-100, -100, -100]
     - [100, 100, 100]
   latency_step: 2
-  gripper_latency_step: 4
+  gripper_latency_step: 8
   # control_fps: 12        # DP 控制频率
   control_fps: 24        # 修改
   #inference_fps: 6
-  inference_fps: 12 #每 2 个 control step 推理一次
+  inference_fps: 8 #每 2 个 control step 推理一次
   n_obs_steps: ${n_obs_steps}
   obs_temporal_downsample_ratio: 1
   task_name: ${task_name}
@@ -130,6 +130,9 @@ dataset:
 
   # make dataset sampling consistent with 24Hz (no downsample)
   obs_temporal_downsample_ratio: 1
+
+  action_smoothing_alpha: 0.15
+  smooth_xyz_only: true
 
   horizon: ${horizon}
   pad_before: ${eval:'${dataset_obs_steps}-1+${n_latency_steps}'}

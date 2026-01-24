@@ -568,10 +568,44 @@ class PAEPGatedDiffusionUnetImageForcePolicy(BaseImagePolicy):
             **self.kwargs,
         )
 
+        # action_pred_full = self.normalizer["action"].unnormalize(nsample)
+        # action_executed = self.normalizer["action"].unnormalize(nsample[:, : self.n_action_steps])
+
+        # return {"action": action_executed, "action_pred": action_pred_full}
         action_pred_full = self.normalizer["action"].unnormalize(nsample)
         action_executed = self.normalizer["action"].unnormalize(nsample[:, : self.n_action_steps])
 
-        return {"action": action_executed, "action_pred": action_pred_full}
+        out = {"action": action_executed, "action_pred": action_pred_full}
+
+        # ---------------- PAEP debug export ----------------
+        # self._last_debug is set in _encode_fused_obs(): (B*To, ...)
+        dbg = getattr(self, "_last_debug", None)
+        if isinstance(dbg, dict) and ("paep_prob" in dbg) and ("g_contact" in dbg):
+            To = int(self.n_obs_steps)
+            paep_prob = dbg["paep_prob"]      # (B*To, 6)
+            g_contact = dbg["g_contact"]      # (B*To,)
+
+            # reshape back to (B, To, ...)
+            paep_prob = paep_prob.reshape(B, To, -1)
+            g_contact = g_contact.reshape(B, To)
+
+            # take the last obs step as "current" event
+            paep_prob_last = paep_prob[:, -1, :]         # (B,6)
+            g_contact_last = g_contact[:, -1]            # (B,)
+
+            paep_event_id = torch.argmax(paep_prob_last, dim=-1)     # (B,)
+            paep_maxprob = torch.max(paep_prob_last, dim=-1).values  # (B,)
+
+            # keep tensors (runner会detach->cpu->numpy)
+            out.update({
+                "paep_prob": paep_prob_last,        # (B,6)
+                "paep_event_id": paep_event_id,     # (B,)
+                "paep_maxprob": paep_maxprob,       # (B,)
+                "paep_g_contact": g_contact_last,   # (B,)
+            })
+        # ---------------------------------------------------
+        return out
+
 
     # ------------------------------------------------------------
     # Training loss + W&B log

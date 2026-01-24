@@ -2,7 +2,7 @@ defaults:
   - wmx_data_collection@_here_
   - _self_
 
-name: wmx_real_plugin_two_cam_image_wrench_ldp_24fps
+name: wmx_real_wiping_board_two_cam_image_wrench_ldp_24fps
 
 image_shape: [3, 240, 320]
 dataset_path: /home/wmx/myspace/RDP/data/plug_in_downsample1_zarr # TODO:

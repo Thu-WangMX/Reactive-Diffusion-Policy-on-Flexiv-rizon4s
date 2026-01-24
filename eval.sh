@@ -7,12 +7,14 @@ POLICY_TYPE=${1:-"DP"}
 echo "正在评估策略类型: ${POLICY_TYPE}"
 
 
-# DP w. GelSight Emb. (Peeling)
-python eval_real_robot_flexiv.py \
-     --config-name train_diffusion_unet_real_image_workspace \
-     task=wmx_real_wiping_board_image_dp_absolute_12fps \
-     +task.env_runner.output_dir=/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/video \
-     +ckpt_path=/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/ckpt/DP/wiping_board/latest.ckpt
+#DP w. GelSight Emb. (Peeling)
+# python eval_real_robot_flexiv.py \
+#      --config-name train_diffusion_unet_real_image_workspace \
+#      task=wmx_real_wiping_board_image_dp_absolute_12fps \
+#      +task.env_runner.output_dir=/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/video \
+#      +ckpt_path=/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/ckpt/DP/wiping_board/latest.ckpt
+
+
 
 # RDP w. Force (Peeling)
 # python eval_real_robot_flexiv.py \
@@ -23,3 +25,16 @@ python eval_real_robot_flexiv.py \
 #       +task.env_runner.output_dir=/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/video \
 #       +ckpt_path=/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/ckpt/RDP/wiping_board/latest.ckpt 
       
+
+
+
+
+#PAEP-guided dual-gated vision-force fusion diffusion policy
+python eval_ours_real_robot_flexiv.py \
+  --config-name train_paep_diffusion_unet_real_image_workspace \
+  task=wmx_paep_real_wiping_board_image_dp_absolute_24fps \
+  +task.env_runner.output_dir=/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/video \
+  +diff_ckpt_path=/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/data/outputs/wmx_paep_real_wiping_board_image_dp_absolute_24fps/0121215912/checkpoints/latest.ckpt \
+  +paep_ckpt_path=/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/PAEP/paep_runs_future_v2/paep_future_ep006.pt \
+  +num_inference_steps=8
+

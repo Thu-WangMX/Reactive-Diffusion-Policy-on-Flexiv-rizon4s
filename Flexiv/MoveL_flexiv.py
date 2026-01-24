@@ -22,6 +22,7 @@ try:
     # 3. 初始化机器人对象
     print(f"正在连接机器人: {ROBOT_SN}...")
     robot = FlexivRobot(ROBOT_SN, GRIPPER_NAME, frequency = 100.0, remote_control=True, gripper_init=False)
+    
     print("✓ 机器人连接成功！")
     robot.switch_PRIMITIVE_Mode()
     print("✓ 机器人初始化完成并进入PRIMITIVE模式。")

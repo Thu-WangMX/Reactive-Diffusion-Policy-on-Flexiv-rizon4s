@@ -1,0 +1,30 @@
+{
+  "policy": "wmx_paep_real_wiping_board_image_dp_absolute_24fps",
+  "run_timestamp": "20260123_175631",
+  "episode_idx": 0,
+  "csv_path": "/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/video/fz_logs/wmx_paep_real_wiping_board_image_dp_absolute_24fps/20260123_175631/episode_000_left_tcp_fz.csv",
+  "npy_path": "/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/video/fz_logs/wmx_paep_real_wiping_board_image_dp_absolute_24fps/20260123_175631/episode_000_left_tcp_fz.npy",
+  "step": [
+    0,
+    3,
+    6,
+    9,
+    12,
+    15,
+    18,
+    21,
+    24,
+    27,
+    30,
+    33,
+    36,
+    39,
+    42,
+    45,
+    48,
+    51,
+    54
+  ],
+  "n": 19,
+  "source_key": "left_robot_tcp_wrench (or compatible) index 2 => Fz"
+}

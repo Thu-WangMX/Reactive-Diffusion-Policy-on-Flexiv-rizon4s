@@ -1,0 +1,10 @@
+{
+  "policy": "wmx_real_image_dp_absolute_12fps",
+  "run_timestamp": "20260123_145908",
+  "episode_idx": 0,
+  "csv_path": "/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/video/fz_logs/wmx_real_image_dp_absolute_12fps/20260123_145908/episode_000_left_tcp_fz.csv",
+  "npy_path": "/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/video/fz_logs/wmx_real_image_dp_absolute_12fps/20260123_145908/episode_000_left_tcp_fz.npy",
+  "step": [],
+  "n": 0,
+  "source_key": "left_robot_tcp_wrench (or compatible) index 2 => Fz"
+}
