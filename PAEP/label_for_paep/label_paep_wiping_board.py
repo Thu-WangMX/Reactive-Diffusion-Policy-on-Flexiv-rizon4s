@@ -2,27 +2,34 @@
 # -*- coding: utf-8 -*-
 
 """
-PAEP auto labeling for wiping-board (v3).
+PAEP auto labeling for wiping-board (v4, factorized labels, NO argparse).
 
-Writes per-frame event labels into Zarr:
-  data/paep_event: int8 array shape (N,)
+Writes per-frame labels into Zarr:
+  data/paep_contact: int8 array shape (N,)
+      0 = free
+      1 = contact
 
-Event id mapping:
-  0 idle
-  1 approach
-  2 under
-  3 effective
-  4 over
-  5 retreat
+  data/paep_phase: int8 array shape (N,)
+      0 = approach
+      1 = progress
+      2 = done
 
-Key improvements:
-- After approach_start, NEVER produce idle again.
-- retreat is triggered ONLY AFTER contact end, with BOTH:
-    (a) low-force confirmation (absFz below contact_exit for some frames)
-    (b) clear continuous rising of TCP z (with margin after end)
+Definition (per episode):
+- contact is detected by abs(Fz) hysteresis + min duration:
+    onset = first index where absFz > CONTACT_ENTER for >= CONTACT_MIN_SEC
+    end   = last index of the last run where absFz > CONTACT_EXIT for >= CONTACT_MIN_SEC
+
+- phase:
+    approach_start = max(0, onset - APPROACH_PRE_SEC*fps)
+    approach: [0, approach_start)
+    progress: [approach_start, end]
+    done: (end, T)
+
+If no stable contact in an episode:
+    contact = free for all frames
+    phase   = approach for all frames
 """
 
-import argparse
 import json
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
@@ -30,66 +37,45 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import zarr
 
+# =========================
+# User config (edit here)
+# =========================
+ZARR_PATH = "/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/dataset/wiping_board_stream_downsample1_zarr/replay_buffer.zarr"
 
-# -----------------------------
-# Fixed configuration (NO CLI)
-# -----------------------------
 WRENCH_KEY = "data/left_robot_tcp_wrench"
-TCP_POSE_KEY = "data/left_robot_tcp_pose"   # needed for retreat detection (z)
 EPISODE_ENDS_KEY = "meta/episode_ends"
-OUT_LABEL_KEY = "data/paep_event"
+
+OUT_CONTACT_KEY = "data/paep_contact"
+OUT_PHASE_KEY   = "data/paep_phase"
 
 FZ_INDEX = 2
 USE_ABS_FZ = True
 
-FPS_FIXED = 24.0  # don't estimate from timestamp
-
-EVENT_NAMES = ["idle", "approach", "under", "effective", "over", "retreat"]
-E = {n: i for i, n in enumerate(EVENT_NAMES)}
-
-PRE_WIPE_LABEL = "idle"
+FPS_FIXED = 24.0  # keep fixed; do not estimate from timestamp
 
 # Timing
-APPROACH_PRE_SEC = 1.0     # label 1s before onset as approach
-CONTACT_MIN_SEC = 0.20     # onset/end require >=0.2s stable frames
+APPROACH_PRE_SEC = 1.0     # backfill approach 1s before contact onset
+CONTACT_MIN_SEC  = 0.20    # onset/end need >= 0.2s stable frames
 
-# Thresholds
-CONTACT_ENTER = 8.0
-CONTACT_EXIT = 4.0
+# Thresholds (recommended starting point from your |Fz| stats)
+# Meaning:
+#  - CONTACT_ENTER: require stronger force to ENTER contact (avoid false positives)
+#  - CONTACT_EXIT : allow lower force to remain in contact, and define the final contact end
+CONTACT_ENTER = 12.0
+CONTACT_EXIT  = 3.0
 
-EFF_LOW_ENTER = 15.0
-EFF_HIGH_ENTER = 40.0
-EFF_LOW_EXIT = 13.0
-EFF_HIGH_EXIT = 42.0
 
-OVER_ENTER = 45.0
-OVER_EXIT = 42.0
+CONTACT_NAMES = ["free", "contact"]
+C = {n: i for i, n in enumerate(CONTACT_NAMES)}
 
-# -----------------------------
-# Retreat constraints (NEW)
-# -----------------------------
-# Only search retreat after (end + margin)
-RETREAT_MARGIN_SEC = 0.35          # wait ~0.35s after end before checking retreat
-RETREAT_WINDOW_SEC = 0.30          # window to measure rising z
-RETREAT_MIN_RISE_M = 0.010         # total rise >= 1 cm
-RETREAT_MIN_POS_FRAC = 0.70        # fraction of dz>0 in window
-
-# Low-force confirmation (prevents "retreat" inside contact)
-RETREAT_REQUIRE_LOW_FORCE = True
-RETREAT_LOW_FORCE_TH = CONTACT_EXIT  # use same as contact_exit (6N)
-RETREAT_LOW_FORCE_SEC = 0.25         # require ~0.25s consecutive low force
+PHASE_NAMES = ["approach", "progress", "done"]
+P = {n: i for i, n in enumerate(PHASE_NAMES)}
 
 
 @dataclass
 class Thr:
     contact_enter: float = CONTACT_ENTER
     contact_exit: float = CONTACT_EXIT
-    eff_low_enter: float = EFF_LOW_ENTER
-    eff_high_enter: float = EFF_HIGH_ENTER
-    eff_low_exit: float = EFF_LOW_EXIT
-    eff_high_exit: float = EFF_HIGH_EXIT
-    over_enter: float = OVER_ENTER
-    over_exit: float = OVER_EXIT
 
 
 def _find_contact_onset(x: np.ndarray, th_enter: float, min_frames: int) -> Optional[int]:
@@ -130,251 +116,144 @@ def _find_contact_end(x: np.ndarray, th_exit: float, min_frames: int) -> Optiona
     return runs[-1][1]
 
 
-def _scan_quality(x: np.ndarray, thr: Thr) -> np.ndarray:
+def label_episode(abs_fz: np.ndarray, fps: float, thr: Thr) -> Tuple[np.ndarray, np.ndarray, Dict]:
     """
-    Assign under/effective/over over a segment with hysteresis.
-    Output is event ids (int8).
+    Returns:
+      contact: (T,) int8 in {0,1}
+      phase:   (T,) int8 in {0,1,2}
+      stats: dict
     """
-    out = np.empty((len(x),), dtype=np.int8)
-
-    def init_state(f: float) -> int:
-        if f >= thr.over_enter:
-            return E["over"]
-        if thr.eff_low_enter <= f <= thr.eff_high_enter:
-            return E["effective"]
-        return E["under"]
-
-    state = init_state(float(x[0]))
-    out[0] = state
-
-    for i in range(1, len(x)):
-        f = float(x[i])
-
-        if state == E["over"]:
-            if f < thr.over_exit:
-                if thr.eff_low_exit <= f <= thr.eff_high_exit:
-                    state = E["effective"]
-                else:
-                    state = E["under"]
-
-        elif state == E["effective"]:
-            if f >= thr.over_enter:
-                state = E["over"]
-            elif not (thr.eff_low_exit <= f <= thr.eff_high_exit):
-                state = E["under"]
-
-        else:  # under
-            if f >= thr.over_enter:
-                state = E["over"]
-            elif thr.eff_low_enter <= f <= thr.eff_high_enter:
-                state = E["effective"]
-            else:
-                state = E["under"]
-
-        out[i] = state
-
-    return out
-
-
-def _detect_retreat_start(
-    abs_fz: np.ndarray,
-    tcp_z: np.ndarray,
-    end_idx: int,
-    fps: float,
-) -> Optional[int]:
-    """
-    Detect retreat start ONLY after contact end, using:
-      - margin after end
-      - low-force confirmation
-      - clear rising z in a short window
-    """
-    T = len(tcp_z)
-    if end_idx >= T - 2:
-        return None
-
-    margin = int(round(RETREAT_MARGIN_SEC * fps))
-    W = max(2, int(round(RETREAT_WINDOW_SEC * fps)))
-    lowK = int(round(RETREAT_LOW_FORCE_SEC * fps)) if RETREAT_REQUIRE_LOW_FORCE else 0
-
-    # Start search strictly after end + margin
-    check_start = min(T - 1, end_idx + 1 + margin)
-    if check_start >= T - W - 1:
-        return None
-
-    for t in range(check_start, T - W - 1):
-        # Low-force gating: require absFz continuously low
-        if RETREAT_REQUIRE_LOW_FORCE and lowK > 0:
-            if t + lowK >= T:
-                break
-            if not np.all(abs_fz[t:t + lowK] < RETREAT_LOW_FORCE_TH):
-                continue
-
-        z0 = float(tcp_z[t])
-        z1 = float(tcp_z[t + W])
-        rise = z1 - z0
-        if rise < RETREAT_MIN_RISE_M:
-            continue
-
-        dz = np.diff(tcp_z[t:t + W + 1].astype(np.float32))
-        pos_frac = float(np.mean(dz > 0.0))
-        if pos_frac >= RETREAT_MIN_POS_FRAC:
-            return t
-
-    return None
-
-
-def label_episode(abs_fz: np.ndarray, tcp_z: np.ndarray, fps: float, thr: Thr) -> Tuple[np.ndarray, Dict]:
     T = len(abs_fz)
-    labels = np.full((T,), E[PRE_WIPE_LABEL], dtype=np.int8)
+    contact = np.full((T,), C["free"], dtype=np.int8)
+    phase   = np.full((T,), P["approach"], dtype=np.int8)
 
     min_frames = max(1, int(round(CONTACT_MIN_SEC * fps)))
     onset = _find_contact_onset(abs_fz, thr.contact_enter, min_frames=min_frames)
-    end = _find_contact_end(abs_fz, thr.contact_exit, min_frames=min_frames)
+    end   = _find_contact_end(abs_fz, thr.contact_exit,  min_frames=min_frames)
 
-    # If no stable contact, keep all PRE_WIPE_LABEL
+    # If no stable contact, keep all free + approach
     if onset is None or end is None or end <= onset:
         stats = {"onset": None, "end": None, "note": "no_stable_contact"}
-        return labels, stats
+        return contact, phase, stats
 
     # Approach start (backfill)
     pre_frames = int(round(APPROACH_PRE_SEC * fps))
     approach_start = max(0, onset - pre_frames)
 
-    # After approach_start -> wiping stage, no more idle
-    labels[approach_start:] = E["under"]
-    labels[approach_start:onset] = E["approach"]
+    # contact label
+    contact[onset:end + 1] = C["contact"]
 
-    # Contact quality segment
-    quality = _scan_quality(abs_fz[onset:end + 1], thr)
-    labels[onset:end + 1] = quality
-
-    # Retreat detection (strictly AFTER end, with low-force + rising z)
-    retreat_start = _detect_retreat_start(abs_fz=abs_fz, tcp_z=tcp_z, end_idx=end, fps=fps)
-    if retreat_start is not None and retreat_start < T:
-        labels[retreat_start:] = E["retreat"]
+    # phase label
+    phase[:approach_start] = P["approach"]
+    phase[approach_start:end + 1] = P["progress"]
+    if end + 1 < T:
+        phase[end + 1:] = P["done"]
 
     stats = {
         "onset": int(onset),
         "end": int(end),
         "approach_start": int(approach_start),
         "contact_min_frames": int(min_frames),
-        "retreat_start": (int(retreat_start) if retreat_start is not None else None),
     }
-    return labels, stats
+    return contact, phase, stats
+
+
+def _write_1d_dataset(data_grp, name: str, arr: np.ndarray):
+    if name in data_grp:
+        del data_grp[name]
+    data_grp.create_dataset(
+        name,
+        data=arr,
+        dtype=np.int8,
+        chunks=(min(8192, len(arr)),),
+        overwrite=True,
+    )
 
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--zarr_path", required=True)
-    args = ap.parse_args()
-
-    root = zarr.open(args.zarr_path, mode="a")
+    root = zarr.open(ZARR_PATH, mode="a")
 
     # sanity checks
-    for k in [WRENCH_KEY, TCP_POSE_KEY, EPISODE_ENDS_KEY]:
+    for k in [WRENCH_KEY, EPISODE_ENDS_KEY]:
         if k not in root:
             raise KeyError(f"Missing key: {k}. Try root.tree() to inspect.")
 
     wrench = np.asarray(root[WRENCH_KEY][:], dtype=np.float32)
-    tcp_pose = np.asarray(root[TCP_POSE_KEY][:], dtype=np.float32)
     episode_ends = np.asarray(root[EPISODE_ENDS_KEY][:], dtype=np.int64)
 
     if wrench.ndim != 2 or wrench.shape[1] < 6:
         raise ValueError(f"{WRENCH_KEY} expected shape [N,6], got {wrench.shape}")
-    if tcp_pose.ndim != 2 or tcp_pose.shape[1] < 3:
-        raise ValueError(f"{TCP_POSE_KEY} expected shape [N,>=3], got {tcp_pose.shape}")
+    if episode_ends.ndim != 1 or len(episode_ends) == 0:
+        raise ValueError(f"{EPISODE_ENDS_KEY} expected shape [E], got {episode_ends.shape}")
 
     N = wrench.shape[0]
-    if tcp_pose.shape[0] != N:
-        raise ValueError(f"Length mismatch: wrench N={N}, tcp_pose N={tcp_pose.shape[0]}")
-    if episode_ends.ndim != 1 or len(episode_ends) == 0 or int(episode_ends[-1]) != N:
-        raise ValueError(
-            f"{EPISODE_ENDS_KEY} must end with N={N}, got last={episode_ends[-1] if len(episode_ends) else None}"
-        )
+    if int(episode_ends[-1]) != N:
+        raise ValueError(f"{EPISODE_ENDS_KEY} must end with N={N}, got last={episode_ends[-1]}")
 
-    # Extract abs(Fz) and tcp z
+    # Extract abs(Fz)
     fz = wrench[:, FZ_INDEX].astype(np.float32)
     abs_fz = np.abs(fz) if USE_ABS_FZ else fz
-    tcp_z = tcp_pose[:, 2].astype(np.float32)
 
-    labels_all = np.full((N,), E[PRE_WIPE_LABEL], dtype=np.int8)
+    contact_all = np.full((N,), C["free"], dtype=np.int8)
+    phase_all   = np.full((N,), P["approach"], dtype=np.int8)
 
     ep_starts = np.concatenate([[0], episode_ends[:-1]])
     thr = Thr()
     stats_list: List[Dict] = []
 
     for ei, (s, e) in enumerate(zip(ep_starts, episode_ends)):
-        lab, st = label_episode(
-            abs_fz=abs_fz[s:e],
-            tcp_z=tcp_z[s:e],
+        c_ep, p_ep, st = label_episode(
+            abs_fz=abs_fz[int(s):int(e)],
             fps=FPS_FIXED,
             thr=thr
         )
-        labels_all[s:e] = lab
+        contact_all[int(s):int(e)] = c_ep
+        phase_all[int(s):int(e)] = p_ep
         st.update({"episode_id": int(ei), "start": int(s), "end_frame": int(e)})
         stats_list.append(st)
 
-    # write to zarr
+    # write to zarr (under data group)
     data_grp = root.require_group("data")
-    out_name = OUT_LABEL_KEY.split("/", 1)[1] if OUT_LABEL_KEY.startswith("data/") else OUT_LABEL_KEY
-    if out_name in data_grp:
-        del data_grp[out_name]
-    data_grp.create_dataset(
-        out_name,
-        data=labels_all,
-        dtype=np.int8,
-        chunks=(min(8192, N),),
-        overwrite=True,
-    )
+    contact_name = OUT_CONTACT_KEY.split("/", 1)[1] if OUT_CONTACT_KEY.startswith("data/") else OUT_CONTACT_KEY
+    phase_name   = OUT_PHASE_KEY.split("/", 1)[1] if OUT_PHASE_KEY.startswith("data/") else OUT_PHASE_KEY
+    _write_1d_dataset(data_grp, contact_name, contact_all)
+    _write_1d_dataset(data_grp, phase_name, phase_all)
 
     # meta info
     meta_grp = root.require_group("meta")
     paep_grp = meta_grp.require_group("paep")
-    paep_grp.attrs["event_names"] = EVENT_NAMES
-    paep_grp.attrs["event2id"] = E
-    paep_grp.attrs["fps_fixed"] = float(FPS_FIXED)
-    paep_grp.attrs["fz_index"] = int(FZ_INDEX)
-    paep_grp.attrs["use_abs_fz"] = bool(USE_ABS_FZ)
-    paep_grp.attrs["pre_wipe_label"] = PRE_WIPE_LABEL
+    paep_grp.attrs["contact_names_v4"] = CONTACT_NAMES
+    paep_grp.attrs["contact2id_v4"] = C
+    paep_grp.attrs["phase_names_v4"] = PHASE_NAMES
+    paep_grp.attrs["phase2id_v4"] = P
 
-    paep_grp.attrs["timing_sec"] = {
+    paep_grp.attrs["fps_fixed_v4"] = float(FPS_FIXED)
+    paep_grp.attrs["fz_index_v4"] = int(FZ_INDEX)
+    paep_grp.attrs["use_abs_fz_v4"] = bool(USE_ABS_FZ)
+
+    paep_grp.attrs["timing_sec_v4"] = {
         "approach_pre_sec": float(APPROACH_PRE_SEC),
         "contact_min_sec": float(CONTACT_MIN_SEC),
-        "retreat_margin_sec": float(RETREAT_MARGIN_SEC),
-        "retreat_window_sec": float(RETREAT_WINDOW_SEC),
-        "retreat_low_force_sec": float(RETREAT_LOW_FORCE_SEC),
-        "retreat_min_rise_m": float(RETREAT_MIN_RISE_M),
-        "retreat_min_pos_frac": float(RETREAT_MIN_POS_FRAC),
     }
-    paep_grp.attrs["thresholds"] = {
+    paep_grp.attrs["thresholds_v4"] = {
         "contact_enter": float(thr.contact_enter),
         "contact_exit": float(thr.contact_exit),
-        "eff_low_enter": float(thr.eff_low_enter),
-        "eff_high_enter": float(thr.eff_high_enter),
-        "eff_low_exit": float(thr.eff_low_exit),
-        "eff_high_exit": float(thr.eff_high_exit),
-        "over_enter": float(thr.over_enter),
-        "over_exit": float(thr.over_exit),
-        "retreat_low_force_th": float(RETREAT_LOW_FORCE_TH),
     }
 
-    counts = {EVENT_NAMES[i]: int(np.sum(labels_all == i)) for i in range(len(EVENT_NAMES))}
-    paep_grp.attrs["counts_v3"] = counts
-    paep_grp.attrs["episode_stats_json_v3"] = json.dumps(stats_list)
+    counts_contact = {CONTACT_NAMES[i]: int(np.sum(contact_all == i)) for i in range(len(CONTACT_NAMES))}
+    counts_phase   = {PHASE_NAMES[i]: int(np.sum(phase_all == i)) for i in range(len(PHASE_NAMES))}
+    paep_grp.attrs["counts_contact_v4"] = counts_contact
+    paep_grp.attrs["counts_phase_v4"] = counts_phase
+    paep_grp.attrs["episode_stats_json_v4"] = json.dumps(stats_list)
 
-    print("[INFO] Wrote labels:", OUT_LABEL_KEY)
-    print("[INFO] Event counts:", counts)
+    print("[INFO] Wrote labels:", OUT_CONTACT_KEY, OUT_PHASE_KEY)
+    print("[INFO] Contact counts:", counts_contact)
+    print("[INFO] Phase counts:", counts_phase)
     if stats_list:
         print("[INFO] Episode[0] stats:", stats_list[0])
-    print("[INFO] Using keys:", WRENCH_KEY, TCP_POSE_KEY)
     print("[INFO] FZ_INDEX=", FZ_INDEX, "abs=", USE_ABS_FZ, "fps=", FPS_FIXED)
-    print("[INFO] Thresholds:", paep_grp.attrs["thresholds"])
-    print("[INFO] Retreat constraints:", paep_grp.attrs["timing_sec"])
+    print("[INFO] Thresholds:", paep_grp.attrs["thresholds_v4"])
 
 
 if __name__ == "__main__":
     main()
-
-
-
-# python /home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/PAEP/label_paep_wiping_board.py   --zarr_path /home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/dataset/wiping_board_stream_downsample1_zarr/replay_buffer.zarr

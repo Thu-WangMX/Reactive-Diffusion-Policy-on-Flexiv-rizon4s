@@ -29,16 +29,12 @@ policy:
   wrench_hist_key: wrench_hist
   pose_key: left_robot_tcp_pose
   gripper_key: left_robot_gripper_width
-  zero_proprio_in_obs_encoder: true
-  # contact_class_ids: [2,3,4]   # 先不改，仍 exclude approach
-  # paep_prob_smooth: false      # 先不加
+
+
   
 
   # ---- PAEP checkpoint ----
-  paep_ckpt: /home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/PAEP/paep_runs_future_v2/paep_future_ep006.pt
-  paep_img_size: 224
-  # contact=under/effective/over (exclude approach)
-  contact_class_ids: [2, 3, 4]
+  paep_ckpt: /home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/PAEP/paep_future_ckpt/paep_runs_0124/best.pt
   gmin: 0.05
   freeze_paep: True
 
@@ -57,20 +53,36 @@ policy:
     steps_offset: 0
     prediction_type: epsilon # or sample
 
+  # obs_encoder:
+  #   _target_: reactive_diffusion_policy.model.vision.multi_image_obs_encoder.MultiImageObsEncoder
+  #   shape_meta: ${shape_meta}
+  #   rgb_model:
+  #    _target_: reactive_diffusion_policy.model.vision.model_getter.get_resnet
+  #    name: resnet18
+  #    weights: null
+  #   resize_shape: [240, 320]
+  #   random_transforms:
+  #     - type: RandomCrop
+  #       ratio: 0.90
+  #   use_group_norm: True
+  #   share_rgb_model: False
+  #   imagenet_norm: True
+
   obs_encoder:
-    _target_: reactive_diffusion_policy.model.vision.multi_image_obs_encoder.MultiImageObsEncoder
-    shape_meta: ${shape_meta}
-    rgb_model:
-     _target_: reactive_diffusion_policy.model.vision.model_getter.get_resnet
-     name: resnet18
-     weights: null
-    resize_shape: [240, 320]
-    random_transforms:
-      - type: RandomCrop
-        ratio: 0.90
-    use_group_norm: True
-    share_rgb_model: False
-    imagenet_norm: True
+  _target_: reactive_diffusion_policy.model.vision.clean_multi_image_obs_encoder.CleanMultiImageObsEncoder
+  shape_meta: ${shape_meta}
+  rgb_model:
+    _target_: reactive_diffusion_policy.model.vision.model_getter.get_resnet
+    name: resnet18
+    weights: null
+  resize_shape: [240, 320]
+  random_transforms:
+    - type: RandomCrop
+      ratio: 0.90
+  use_group_norm: True
+  share_rgb_model: False
+  imagenet_norm: True
+
 
   # timm
 #  obs_encoder:

@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+
 import argparse
 import numpy as np
 import zarr
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--zarr_path", required=True)
+    ap.add_argument("--zarr_path", default="/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/dataset/wiping_board_stream_downsample1_zarr/replay_buffer.zarr")
     ap.add_argument("--wrench_key", default="data/left_robot_tcp_wrench")
     ap.add_argument("--timestamp_key", default="data/timestamp")
     ap.add_argument("--episode_ends_key", default="meta/episode_ends")
     ap.add_argument("--fz_index", type=int, default=2)
-    ap.add_argument("--use_abs", action="store_true")
+    ap.add_argument("--use_abs", default=True, action="store_true")
     ap.add_argument("--print_per_episode", action="store_true")
     args = ap.parse_args()
 

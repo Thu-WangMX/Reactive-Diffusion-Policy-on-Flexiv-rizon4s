@@ -1,5 +1,4 @@
-# PAEP/paep_train/train_paep.py
-import argparse
+# train_paep.py
 import os
 import time
 from typing import Dict
@@ -10,12 +9,64 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from paep_dataset import PAEPFutureDataset, EVENT_NAMES, NUM_EVENTS, NormStats
+from paep_dataset import PAEPFutureDataset, EVENT_NAMES, NUM_EVENTS
 from paep_model import PAEPFutureNet
 
 
+# =========================
+# 配置区：你只改这里
+# =========================
+ZARR_PATH = "/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/dataset/wiping_board_stream_downsample1_zarr/replay_buffer.zarr"
+SPLIT_JSON = "/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/PAEP/paep_split_40_5_5.json"
+SAVE_DIR = "/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/PAEP/paep_future_ckpt/paep_runs_0124"
+
+FORCE_HIST = 48
+DELTA = 6
+FUTURE_K = 12  # 24Hz * 0.5s window
+
+# Force encoder switch: "gru" or "tcn"
+FORCE_ENCODER = "tcn"
+FORCE_K = 25  # GRU conv kernel
+
+# TCN params (only used if FORCE_ENCODER="tcn")
+TCN_CHANNELS = 256
+TCN_KERNEL = 5
+TCN_BLOCKS = 4
+TCN_DROPOUT = 0.0
+TCN_POOL = "mean"  # "mean" or "last"
+
+IMG_PRETRAINED = True
+IMG_SIZE = 224
+
+BATCH_SIZE = 128
+SAMPLES_PER_EPOCH = 20000
+VAL_SAMPLES = 4000
+EPOCHS = 20
+LR = 3e-4
+
+DEVICE = "cuda"
+AMP = True
+
+# transition oversampling (phase transition)
+TRANSITION_SAMPLING = True
+TRANSITION_PROB = 0.3
+TRANSITION_WINDOW = 12
+
+# wiping：phase 不是重点，保留通用性但降低权重
+PHASE_LOSS_W = 0.1
+
+FREEZE_VISION_EPOCHS = 10
+EARLY_STOP_PATIENCE = 5
+LOG_EVERY = 50
+
+# wandb
+USE_WANDB = True
+WANDB_PROJECT = "PAEP"
+WANDB_NAME = "paep_future_tcn_0124"
+# =========================
+
+
 def compute_class_weights(class_counts: Dict[str, int]) -> torch.Tensor:
-    # inverse frequency with smoothing
     counts = np.array([class_counts[n] for n in EVENT_NAMES], dtype=np.float64)
     counts = np.maximum(counts, 1.0)
     inv = 1.0 / counts
@@ -23,121 +74,73 @@ def compute_class_weights(class_counts: Dict[str, int]) -> torch.Tensor:
     return torch.tensor(w, dtype=torch.float32)
 
 
-def confusion_matrix_np(y_true: np.ndarray, y_pred: np.ndarray, C: int) -> np.ndarray:
-    cm = np.zeros((C, C), dtype=np.int64)
-    for t, p in zip(y_true, y_pred):
-        cm[int(t), int(p)] += 1
-    return cm
-
-
-def per_class_prf(cm: np.ndarray):
-    out = {}
-    for c in range(cm.shape[0]):
-        tp = cm[c, c]
-        fp = cm[:, c].sum() - tp
-        fn = cm[c, :].sum() - tp
-        prec = float(tp / (tp + fp + 1e-9))
-        rec = float(tp / (tp + fn + 1e-9))
-        f1 = float((2 * prec * rec) / (prec + rec + 1e-9))
-        out[c] = {"precision": prec, "recall": rec, "f1": f1, "support": float(cm[c, :].sum())}
-    macro_f1 = float(np.mean([out[c]["f1"] for c in out.keys()]))
-    return out, macro_f1
-
-
 @torch.no_grad()
-def eval_n(model, loader, device, norm_torch, img_size: int):
+def eval_n(model, loader, device, norm_torch, img_size: int, phase_w: torch.Tensor):
     model.eval()
-    total_loss, total_n = 0.0, 0
-    ys, ps = [], []
+    total_n = 0
+    loss_p_sum = 0.0
+    loss_c_sum = 0.0
+    phase_correct = 0
+    contact_correct = 0
+
     for batch in loader:
         ext = batch["ext_img"].to(device, non_blocking=True)
         wrist = batch["wrist_img"].to(device, non_blocking=True)
         wrench = batch["wrench_hist"].to(device, non_blocking=True)
         pose = batch["pose"].to(device, non_blocking=True)
-        y = batch["y"].to(device, non_blocking=True)
 
-        logits = model(ext, wrist, wrench, pose, norm=norm_torch, img_size=img_size)
-        loss = F.cross_entropy(logits, y)
-        pred = logits.argmax(dim=-1)
+        y_phase = batch["y_phase"].to(device, non_blocking=True)        # (B,)
+        y_contact = batch["y_contact"].to(device, non_blocking=True)    # (B,1)
 
-        total_loss += float(loss.item()) * y.shape[0]
-        total_n += int(y.shape[0])
+        logits_p, logit_c = model.forward_logits(
+            ext, wrist, wrench, pose, norm=norm_torch, img_size=img_size
+        )
 
-        ys.append(y.cpu().numpy())
-        ps.append(pred.cpu().numpy())
+        loss_p = F.cross_entropy(logits_p, y_phase, weight=phase_w)
+        loss_c = F.binary_cross_entropy_with_logits(logit_c, y_contact)
 
-    y_true = np.concatenate(ys, axis=0)
-    y_pred = np.concatenate(ps, axis=0)
-    acc = float((y_true == y_pred).mean())
-    cm = confusion_matrix_np(y_true, y_pred, NUM_EVENTS)
-    prf, mf1 = per_class_prf(cm)
-    return total_loss / max(total_n, 1), acc, mf1, cm, prf
+        pred_p = logits_p.argmax(dim=-1)
+        phase_correct += int((pred_p == y_phase).sum().item())
+
+        pred_c = (torch.sigmoid(logit_c) >= 0.5).to(torch.float32)
+        contact_correct += int((pred_c == y_contact).sum().item())
+
+        B = int(y_phase.shape[0])
+        total_n += B
+        loss_p_sum += float(loss_p.item()) * B
+        loss_c_sum += float(loss_c.item()) * B
+
+    return {
+        "val/loss_phase": loss_p_sum / max(total_n, 1),
+        "val/loss_contact": loss_c_sum / max(total_n, 1),
+        "val/acc_phase": phase_correct / max(total_n, 1),
+        "val/acc_contact": contact_correct / max(total_n, 1),
+        "val/n": total_n,
+    }
 
 
 def main():
-    ap = argparse.ArgumentParser()
-
-    ap.add_argument("--zarr_path", required=True)
-    ap.add_argument("--split_json", required=True)
-    ap.add_argument("--save_dir", required=True)
-
-    ap.add_argument("--force_hist", type=int, default=48)
-    ap.add_argument("--delta", type=int, default=6)
-    ap.add_argument("--force_k", type=int, default=25)
-
-    ap.add_argument("--batch_size", type=int, default=128)
-    ap.add_argument("--samples_per_epoch", type=int, default=20000)
-    ap.add_argument("--val_samples", type=int, default=4000)
-    ap.add_argument("--epochs", type=int, default=20)
-    ap.add_argument("--lr", type=float, default=3e-4)
-
-    ap.add_argument("--num_workers", type=int, default=0)
-    ap.add_argument("--pin_memory", action="store_true")
-    ap.add_argument("--device", default="cuda")
-
-    ap.add_argument("--amp", action="store_true")
-    ap.add_argument("--img_pretrained", action="store_true")
-    ap.add_argument("--img_size", type=int, default=224)
-
-    # improvements
-    ap.add_argument("--transition_sampling", action="store_true")
-    ap.add_argument("--transition_prob", type=float, default=0.7)
-    ap.add_argument("--transition_window", type=int, default=12)
-
-    ap.add_argument("--freeze_vision_epochs", type=int, default=10)  # key
-    ap.add_argument("--early_stop_patience", type=int, default=5)
-
-    ap.add_argument("--log_every", type=int, default=50)
-
-    ap.add_argument("--use_wandb", action="store_true")
-    ap.add_argument("--wandb_project", default="PAEP")
-    ap.add_argument("--wandb_name", default=None)
-
-    args = ap.parse_args()
-
-    os.makedirs(args.save_dir, exist_ok=True)
-    device = torch.device(args.device)
+    os.makedirs(SAVE_DIR, exist_ok=True)
+    device = torch.device(DEVICE)
 
     # datasets
     train_ds = PAEPFutureDataset(
-        args.zarr_path,
-        args.split_json,
-        "train",
-        force_hist=args.force_hist,
-        delta=args.delta,
+        ZARR_PATH, SPLIT_JSON, "train",
+        force_hist=FORCE_HIST,
+        delta=DELTA,
+        future_k=FUTURE_K,
         seed=0,
-        transition_sampling=args.transition_sampling,
-        transition_prob=args.transition_prob,
-        transition_window=args.transition_window,
+        transition_sampling=TRANSITION_SAMPLING,
+        transition_prob=TRANSITION_PROB,
+        transition_window=TRANSITION_WINDOW,
         compute_norm=True,
         norm_samples=20000,
     )
     val_ds = PAEPFutureDataset(
-        args.zarr_path,
-        args.split_json,
-        "val",
-        force_hist=args.force_hist,
-        delta=args.delta,
+        ZARR_PATH, SPLIT_JSON, "val",
+        force_hist=FORCE_HIST,
+        delta=DELTA,
+        future_k=FUTURE_K,
         seed=0,
         transition_sampling=False,
         compute_norm=False,
@@ -145,32 +148,33 @@ def main():
     )
 
     print("Train group:", train_ds.group_name)
-    print("Train class counts:", train_ds.class_counts)
-    print("Val class counts:", val_ds.class_counts)
-    print(f"force_hist={args.force_hist}, delta={args.delta} (predict t+Δ), force_k={args.force_k}")
-    if args.transition_sampling:
-        print(f"transition_sampling=ON prob={args.transition_prob} window={args.transition_window}")
+    print("Train phase counts:", train_ds.class_counts)
+    print("Train contact counts:", train_ds.contact_counts)
+    print("Val phase counts:", val_ds.class_counts)
+    print("Val contact counts:", val_ds.contact_counts)
+    print(f"force_hist={FORCE_HIST}, delta={DELTA}, future_k={FUTURE_K}, force_encoder={FORCE_ENCODER}")
 
-    # dataloaders: we control steps/epoch by breaking after N steps
+    if TRANSITION_SAMPLING:
+        print(f"transition_sampling=ON prob={TRANSITION_PROB} window={TRANSITION_WINDOW}")
+
+    # loaders (dataset is effectively infinite; steps_per_epoch controls)
     train_loader = DataLoader(
         train_ds,
-        batch_size=args.batch_size,
+        batch_size=BATCH_SIZE,
         shuffle=False,
-        num_workers=args.num_workers,
-        pin_memory=args.pin_memory,
+        num_workers=0,
+        pin_memory=False,
         drop_last=True,
     )
 
-    # val fixed-N wrapper
     class _TakeN(torch.utils.data.Dataset):
         def __init__(self, base, n): self.base, self.n = base, n
         def __len__(self): return self.n
         def __getitem__(self, i): return self.base[i]
 
-    val_take = _TakeN(val_ds, args.val_samples)
     val_loader = DataLoader(
-        val_take,
-        batch_size=min(args.batch_size, 512),
+        _TakeN(val_ds, VAL_SAMPLES),
+        batch_size=min(BATCH_SIZE, 512),
         shuffle=False,
         num_workers=0,
         pin_memory=False,
@@ -179,25 +183,42 @@ def main():
     # model
     model = PAEPFutureNet(
         num_events=NUM_EVENTS,
-        img_pretrained=args.img_pretrained,
-        force_k=args.force_k,
+        img_pretrained=IMG_PRETRAINED,
+        img_feat_dim=256,
+        force_encoder=FORCE_ENCODER,
+        force_k=FORCE_K,
+        force_feat_dim=256,
+        tcn_channels=TCN_CHANNELS,
+        tcn_kernel=TCN_KERNEL,
+        tcn_blocks=TCN_BLOCKS,
+        tcn_dropout=TCN_DROPOUT,
+        tcn_pool=TCN_POOL,
     ).to(device)
 
     # norm tensors
     norm_torch = train_ds.norm.to_torch(device=device)
 
-    # weights
-    w = compute_class_weights(train_ds.class_counts).to(device)
+    # class weights for phase
+    phase_w = compute_class_weights(train_ds.class_counts).to(device)
 
     # wandb
     run = None
-    if args.use_wandb:
+    if USE_WANDB:
         import wandb
-        run = wandb.init(project=args.wandb_project, name=args.wandb_name)
-        run.config.update(vars(args))
+        run = wandb.init(project=WANDB_PROJECT, name=WANDB_NAME)
+        run.config.update({
+            "ZARR_PATH": ZARR_PATH, "SPLIT_JSON": SPLIT_JSON, "SAVE_DIR": SAVE_DIR,
+            "FORCE_HIST": FORCE_HIST, "DELTA": DELTA, "FUTURE_K": FUTURE_K,
+            "FORCE_ENCODER": FORCE_ENCODER, "FORCE_K": FORCE_K,
+            "TCN_CHANNELS": TCN_CHANNELS, "TCN_KERNEL": TCN_KERNEL, "TCN_BLOCKS": TCN_BLOCKS,
+            "TCN_DROPOUT": TCN_DROPOUT, "TCN_POOL": TCN_POOL,
+            "BATCH_SIZE": BATCH_SIZE, "SAMPLES_PER_EPOCH": SAMPLES_PER_EPOCH, "VAL_SAMPLES": VAL_SAMPLES,
+            "EPOCHS": EPOCHS, "LR": LR, "AMP": AMP, "IMG_PRETRAINED": IMG_PRETRAINED, "IMG_SIZE": IMG_SIZE,
+            "TRANSITION_SAMPLING": TRANSITION_SAMPLING, "TRANSITION_PROB": TRANSITION_PROB, "TRANSITION_WINDOW": TRANSITION_WINDOW,
+            "PHASE_LOSS_W": PHASE_LOSS_W,
+        })
 
     def make_optimizer(vision_lr_mult=0.1):
-        # separate lr for vision backbone (optional smaller)
         vision_params = []
         other_params = []
         for n, p in model.named_parameters():
@@ -207,41 +228,41 @@ def main():
                 vision_params.append(p)
             else:
                 other_params.append(p)
-        groups = [{"params": other_params, "lr": args.lr}]
+        groups = [{"params": other_params, "lr": LR}]
         if len(vision_params) > 0:
-            groups.append({"params": vision_params, "lr": args.lr * vision_lr_mult})
+            groups.append({"params": vision_params, "lr": LR * vision_lr_mult})
         return torch.optim.AdamW(groups, weight_decay=1e-4)
 
-    # start with vision frozen (saves generalization)
-    if args.freeze_vision_epochs > 0:
+    if FREEZE_VISION_EPOCHS > 0:
         model.set_vision_trainable(False)
     optimizer = make_optimizer(vision_lr_mult=0.1)
 
-    # AMP
-    scaler = torch.amp.GradScaler("cuda", enabled=args.amp)
+    scaler = torch.amp.GradScaler("cuda", enabled=AMP)
     autocast = torch.amp.autocast
 
-    steps_per_epoch = int(np.ceil(args.samples_per_epoch / args.batch_size))
+    steps_per_epoch = int(np.ceil(SAMPLES_PER_EPOCH / BATCH_SIZE))
 
-    best_val_acc = -1.0
+    best_score = -1.0
     best_epoch = -1
-    best_val_mf1 = -1.0
-    patience_left = args.early_stop_patience
-
+    patience_left = EARLY_STOP_PATIENCE
     global_step = 0
 
-    for epoch in range(args.epochs):
-        # unfreeze vision after N epochs (optional)
-        if args.freeze_vision_epochs > 0 and epoch == args.freeze_vision_epochs:
+    for epoch in range(EPOCHS):
+        if FREEZE_VISION_EPOCHS > 0 and epoch == FREEZE_VISION_EPOCHS:
             model.set_vision_trainable(True)
-            optimizer = make_optimizer(vision_lr_mult=0.05)  # smaller lr for vision
+            optimizer = make_optimizer(vision_lr_mult=0.05)
             print(f"[info] Unfroze vision at epoch {epoch}, recreated optimizer.")
 
         model.train()
         t0 = time.time()
-        loss_sum, correct, total = 0.0, 0, 0
 
-        pbar = tqdm(enumerate(train_loader), total=steps_per_epoch, desc=f"Epoch {epoch:03d}/{args.epochs-1:03d}")
+        n_total = 0
+        loss_p_sum = 0.0
+        loss_c_sum = 0.0
+        phase_correct = 0
+        contact_correct = 0
+
+        pbar = tqdm(enumerate(train_loader), total=steps_per_epoch, desc=f"Epoch {epoch:03d}/{EPOCHS-1:03d}")
         for it, batch in pbar:
             if it >= steps_per_epoch:
                 break
@@ -250,35 +271,53 @@ def main():
             wrist = batch["wrist_img"].to(device, non_blocking=True)
             wrench = batch["wrench_hist"].to(device, non_blocking=True)
             pose = batch["pose"].to(device, non_blocking=True)
-            y = batch["y"].to(device, non_blocking=True)
+
+            y_phase = batch["y_phase"].to(device, non_blocking=True)       # (B,)
+            y_contact = batch["y_contact"].to(device, non_blocking=True)   # (B,1)
 
             optimizer.zero_grad(set_to_none=True)
 
-            with autocast(device_type="cuda", enabled=args.amp):
-                logits = model(ext, wrist, wrench, pose, norm=norm_torch, img_size=args.img_size)
-                loss = F.cross_entropy(logits, y, weight=w)
+            with autocast(device_type="cuda", enabled=AMP):
+                logits_p, logit_c = model.forward_logits(
+                    ext, wrist, wrench, pose, norm=norm_torch, img_size=IMG_SIZE
+                )
+                loss_p = F.cross_entropy(logits_p, y_phase, weight=phase_w)
+                loss_c = F.binary_cross_entropy_with_logits(logit_c, y_contact)
+                loss = loss_c + float(PHASE_LOSS_W) * loss_p
 
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
 
-            pred = logits.argmax(dim=-1)
-            correct += int((pred == y).sum().item())
-            total += int(y.shape[0])
-            loss_sum += float(loss.item()) * y.shape[0]
+            B = int(y_phase.shape[0])
+            n_total += B
+            loss_p_sum += float(loss_p.item()) * B
+            loss_c_sum += float(loss_c.item()) * B
 
-            acc = correct / max(total, 1)
-            avg_loss = loss_sum / max(total, 1)
+            pred_p = logits_p.argmax(dim=-1)
+            phase_correct += int((pred_p == y_phase).sum().item())
 
-            if (global_step % args.log_every) == 0:
-                # GPU mem
-                mem_gb = torch.cuda.memory_allocated(device) / (1024**3)
-                peak_gb = torch.cuda.max_memory_allocated(device) / (1024**3)
-                pbar.set_postfix(loss=f"{avg_loss:.4f}", acc=f"{acc:.3f}", mem=f"{mem_gb:.1f}G", peak=f"{peak_gb:.1f}G")
+            pred_c = (torch.sigmoid(logit_c) >= 0.5).to(torch.float32)
+            contact_correct += int((pred_c == y_contact).sum().item())
+
+            if (global_step % LOG_EVERY) == 0:
+                avg_lp = loss_p_sum / max(n_total, 1)
+                avg_lc = loss_c_sum / max(n_total, 1)
+                acc_p = phase_correct / max(n_total, 1)
+                acc_c = contact_correct / max(n_total, 1)
+
+                mem_gb = torch.cuda.memory_allocated(device) / (1024**3) if device.type == "cuda" else 0.0
+                peak_gb = torch.cuda.max_memory_allocated(device) / (1024**3) if device.type == "cuda" else 0.0
+
+                pbar.set_postfix(lp=f"{avg_lp:.3f}", lc=f"{avg_lc:.3f}", ap=f"{acc_p:.3f}", ac=f"{acc_c:.3f}",
+                                 mem=f"{mem_gb:.1f}G", peak=f"{peak_gb:.1f}G")
+
                 if run is not None:
                     run.log({
-                        "train/loss": avg_loss,
-                        "train/acc": acc,
+                        "train/loss_phase": avg_lp,
+                        "train/loss_contact": avg_lc,
+                        "train/acc_phase": acc_p,
+                        "train/acc_contact": acc_c,
                         "train/lr": optimizer.param_groups[0]["lr"],
                         "gpu/mem_alloc_gb": mem_gb,
                         "gpu/mem_peak_gb": peak_gb,
@@ -288,87 +327,92 @@ def main():
 
             global_step += 1
 
-        train_loss = loss_sum / max(total, 1)
-        train_acc = correct / max(total, 1)
+        train_lp = loss_p_sum / max(n_total, 1)
+        train_lc = loss_c_sum / max(n_total, 1)
+        train_ap = phase_correct / max(n_total, 1)
+        train_ac = contact_correct / max(n_total, 1)
 
-        # val
-        val_loss, val_acc, val_mf1, cm, prf = eval_n(model, val_loader, device, norm_torch, img_size=args.img_size)
-
+        val = eval_n(model, val_loader, device, norm_torch, img_size=IMG_SIZE, phase_w=phase_w)
         epoch_time = time.time() - t0
-        print(f"[epoch {epoch:03d}] train_loss={train_loss:.6f} train_acc={train_acc:.4f}  "
-              f"val_loss={val_loss:.6f} val_acc={val_acc:.4f} val_macroF1={val_mf1:.4f}  time={epoch_time:.1f}s")
+
+        print(
+            f"[epoch {epoch:03d}] "
+            f"train_lp={train_lp:.4f} train_lc={train_lc:.4f} train_ap={train_ap:.4f} train_ac={train_ac:.4f} | "
+            f"val_lp={val['val/loss_phase']:.4f} val_lc={val['val/loss_contact']:.4f} "
+            f"val_ap={val['val/acc_phase']:.4f} val_ac={val['val/acc_contact']:.4f} "
+            f"time={epoch_time:.1f}s"
+        )
 
         if run is not None:
-            # log epoch metrics
-            log = {
-                "epoch_train/loss": train_loss,
-                "epoch_train/acc": train_acc,
-                "epoch_val/loss": val_loss,
-                "epoch_val/acc": val_acc,
-                "epoch_val/macro_f1": val_mf1,
+            run.log({
+                "epoch_train/loss_phase": train_lp,
+                "epoch_train/loss_contact": train_lc,
+                "epoch_train/acc_phase": train_ap,
+                "epoch_train/acc_contact": train_ac,
+                "epoch_val/loss_phase": val["val/loss_phase"],
+                "epoch_val/loss_contact": val["val/loss_contact"],
+                "epoch_val/acc_phase": val["val/acc_phase"],
+                "epoch_val/acc_contact": val["val/acc_contact"],
                 "epoch_time_sec": epoch_time,
                 "epoch": epoch,
-            }
-            run.log(log, step=global_step)
+            }, step=global_step)
 
-            # per-class table
-            import wandb
-            table = wandb.Table(columns=["class", "precision", "recall", "f1", "support"])
-            for i, name in enumerate(EVENT_NAMES):
-                d = prf[i]
-                table.add_data(name, d["precision"], d["recall"], d["f1"], d["support"])
-            run.log({"epoch_val/per_class_prf": table}, step=global_step)
+        # best score: contact 为主，phase 轻权重
+        score = float(val["val/acc_contact"]) + float(PHASE_LOSS_W) * float(val["val/acc_phase"])
+        improved = score > best_score + 1e-6
+        if improved:
+            best_score = score
+            best_epoch = epoch
+            patience_left = EARLY_STOP_PATIENCE
+        else:
+            patience_left -= 1
 
-            # confusion matrix as table
-            cm_table = wandb.Table(
-                columns=["true\\pred"] + EVENT_NAMES,
-                data=[[EVENT_NAMES[i]] + [int(cm[i, j]) for j in range(NUM_EVENTS)] for i in range(NUM_EVENTS)],
-            )
-            run.log({"epoch_val/confusion_matrix": cm_table}, step=global_step)
-
-        # save ckpt each epoch + best by val_macroF1 (or val_acc)
         ckpt = {
             "model": model.state_dict(),
-            "force_hist": args.force_hist,
-            "delta": args.delta,
-            "force_k": args.force_k,
-            "img_size": args.img_size,
+            "cfg": {
+                "force_hist": FORCE_HIST,
+                "delta": DELTA,
+                "future_k": FUTURE_K,
+                "force_encoder": FORCE_ENCODER,
+                "force_k": FORCE_K,
+                "tcn": {
+                    "channels": TCN_CHANNELS,
+                    "kernel": TCN_KERNEL,
+                    "blocks": TCN_BLOCKS,
+                    "dropout": TCN_DROPOUT,
+                    "pool": TCN_POOL,
+                },
+                "img_size": IMG_SIZE,
+                "phase_loss_w": PHASE_LOSS_W,
+                "phase_names": EVENT_NAMES,
+            },
             "norm": {
                 "wrench_mean": train_ds.norm.wrench_mean,
                 "wrench_std": train_ds.norm.wrench_std,
                 "pose_mean": train_ds.norm.pose_mean,
                 "pose_std": train_ds.norm.pose_std,
             },
-            "eval_samples": max(args.val_samples, 10000),
+            "val": {
+                "acc_phase": val["val/acc_phase"],
+                "acc_contact": val["val/acc_contact"],
+                "score": score,
+            },
         }
-        torch.save(ckpt, os.path.join(args.save_dir, f"paep_future_ep{epoch:03d}.pt"))
 
-        improved = False
-        # Prefer macro-F1 as "best" (more fair for rare events)
-        if val_mf1 > best_val_mf1 + 1e-6:
-            best_val_mf1 = val_mf1
-            improved = True
-        if val_acc > best_val_acc + 1e-6:
-            best_val_acc = val_acc
-            best_epoch = epoch
-
+        torch.save(ckpt, os.path.join(SAVE_DIR, f"paep_future_ep{epoch:03d}.pt"))
         if improved:
-            torch.save(ckpt, os.path.join(args.save_dir, "best.pt"))
-            patience_left = args.early_stop_patience
-        else:
-            patience_left -= 1
+            torch.save(ckpt, os.path.join(SAVE_DIR, "best.pt"))
 
         if patience_left <= 0:
-            print(f"[early-stop] No improvement for {args.early_stop_patience} epochs. Stop at epoch {epoch}.")
+            print(f"[early-stop] No improvement for {EARLY_STOP_PATIENCE} epochs. Stop at epoch {epoch}.")
             break
 
     if run is not None:
-        run.summary["best_val_acc"] = best_val_acc
-        run.summary["best_val_macro_f1"] = best_val_mf1
-        run.summary["best_epoch_acc"] = best_epoch
+        run.summary["best_score"] = best_score
+        run.summary["best_epoch"] = best_epoch
         run.finish()
 
-    print("Done. best_val_acc:", best_val_acc, "best_val_macro_f1:", best_val_mf1, "best_epoch_acc:", best_epoch)
+    print("Done. best_score:", best_score, "best_epoch:", best_epoch)
 
 
 if __name__ == "__main__":

@@ -2,16 +2,17 @@
 set -e
 
 # ================= 配置区域 =================
-GPU_IDS="0,1,2,3"
-NUM_PROCESSES=4
+GPU_IDS="0"
+NUM_PROCESSES=1
 MASTER_PORT=29502
 
-DATASET_PATH="/home/ubuntu/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/dataset/wiping_board_stream_downsample1_zarr"
+#DATASET_PATH="/home/ubuntu/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/dataset/wiping_board_stream_downsample1_zarr"
+DATASET_PATH="/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/dataset/wiping_board_stream_downsample1_zarr"
 
 OURS_TASK="wmx_paep_real_wiping_board_image_dp_absolute_24fps"
 WS_CONFIG="train_paep_diffusion_unet_real_image_workspace"
 
-PAEP_CKPT="/home/ubuntu/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/PAEP/paep_runs_future_v2/paep_future_ep006.pt"
+PAEP_CKPT="/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/PAEP/paep_future_ckpt/paep_runs_0124/best.pt"
 
 LOGGING_MODE="online"   # or offline
 LOG_DIR="train_logs_ours"

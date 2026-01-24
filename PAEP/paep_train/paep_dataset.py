@@ -1,4 +1,4 @@
-# PAEP/paep_train/paep_dataset.py
+# paep_dataset.py
 import json
 import random
 from dataclasses import dataclass
@@ -7,12 +7,15 @@ from typing import Dict, List, Tuple, Optional
 import numpy as np
 import torch
 from torch.utils.data import Dataset
-
 import zarr
 
 
-EVENT_NAMES = ["idle", "approach", "under", "effective", "over", "retreat"]
-NUM_EVENTS = len(EVENT_NAMES)
+# wiping board (new labels)
+PHASE_NAMES = ["approach", "progress", "done"]
+NUM_EVENTS = 3
+EVENT_NAMES = PHASE_NAMES
+
+CONTACT_NAMES = ["free", "contact"]
 
 
 def load_split_ids(split_json: str, split: str) -> List[int]:
@@ -24,10 +27,11 @@ def load_split_ids(split_json: str, split: str) -> List[int]:
 
 def _open_group(zarr_path: str):
     root = zarr.open(zarr_path, mode="r")
-    # auto-detect whether keys are at root or under "data"
     if isinstance(root, zarr.hierarchy.Group):
+        # arrays at root
         if "external_img" in root.array_keys():
             return root, "root"
+        # arrays under data/
         if "data" in root.group_keys():
             g = root["data"]
             if "external_img" in g.array_keys():
@@ -36,7 +40,6 @@ def _open_group(zarr_path: str):
 
 
 def _episode_slices(episode_ends: np.ndarray) -> List[Tuple[int, int]]:
-    # episode_ends: shape (E,), each is end index (exclusive)
     ends = episode_ends.astype(np.int64).tolist()
     slices = []
     s = 0
@@ -64,12 +67,18 @@ class NormStats:
 
 class PAEPFutureDataset(Dataset):
     """
-    One sample = (I_ext[t], I_wrist[t], F_hist[t-L+1:t], pose[t]) -> y[t+delta]
+    Sample at time t:
 
-    Implements:
-      - transition oversampling (sample near event transitions with probability p)
-      - class counts (for weights)
-      - normalization stats (force/pose)
+    Inputs:
+      ext_img[t], wrist_img[t], wrench_hist[t-L+1:t], pose[t]
+
+    Targets:
+      y_phase = phase[t+delta]                    (single future frame)
+      y_contact = OR(contact[t+1 .. t+K])         (future window OR)
+
+    Notes:
+      - We ensure sampling t does not cross episode boundary (by valid_ranges)
+      - transition_sampling oversamples near phase transitions
     """
 
     def __init__(
@@ -79,36 +88,35 @@ class PAEPFutureDataset(Dataset):
         split: str,
         force_hist: int,
         delta: int,
+        future_k: int = 12,  # 24Hz * 0.5s
         seed: int = 0,
-        # transition sampling
         transition_sampling: bool = False,
         transition_prob: float = 0.6,
         transition_window: int = 12,
-        # normalization
         compute_norm: bool = True,
         norm_samples: int = 20000,
         provided_norm: Optional[NormStats] = None,
     ):
         super().__init__()
         self.rng = random.Random(seed + (0 if split == "train" else (123 if split == "val" else 456)))
-        self.np_rng = np.random.default_rng(seed + (0 if split == "train" else (123 if split == "val" else 456)))
 
         self.group, self.group_name = _open_group(zarr_path)
 
         self.force_hist = int(force_hist)
         self.delta = int(delta)
+        self.future_k = int(future_k)
 
         self.transition_sampling = bool(transition_sampling)
         self.transition_prob = float(transition_prob)
         self.transition_window = int(transition_window)
 
-        # keys
         required = [
             "external_img",
             "left_wrist_img",
             "left_robot_tcp_wrench",
             "left_robot_tcp_pose",
-            "paep_event",
+            "paep_contact",
+            "paep_phase",
         ]
         for k in required:
             if k not in self.group.array_keys():
@@ -118,10 +126,10 @@ class PAEPFutureDataset(Dataset):
         self.wrist = self.group["left_wrist_img"]
         self.wrench = self.group["left_robot_tcp_wrench"]
         self.pose = self.group["left_robot_tcp_pose"]
-        self.event = self.group["paep_event"]
+        self.contact = self.group["paep_contact"]  # int8 0/1
+        self.phase = self.group["paep_phase"]      # int8 0/1/2
 
-        # episodes
-        # Prefer meta/episode_ends if exists at root; if group is "data", meta is sibling under root
+        # episode ends
         root = zarr.open(zarr_path, mode="r")
         if "meta" in root.group_keys() and "episode_ends" in root["meta"].array_keys():
             episode_ends = np.array(root["meta"]["episode_ends"][:], dtype=np.int64)
@@ -131,45 +139,41 @@ class PAEPFutureDataset(Dataset):
             raise KeyError("Missing meta/episode_ends")
 
         self.episode_slices_all = _episode_slices(episode_ends)
-
         self.episode_ids = load_split_ids(split_json, split)
         self.episode_slices = [self.episode_slices_all[i] for i in self.episode_ids]
 
-        # Precompute transition indices per episode (global frame indices)
+        # valid ranges + transitions per episode
+        self.valid_ranges: List[Tuple[int, int]] = []
         self.transition_indices: List[np.ndarray] = []
-        self.valid_ranges: List[Tuple[int, int]] = []  # [lo, hi) valid t for sampling
+
+        need_future = max(self.delta, self.future_k)
+
         for (s, e) in self.episode_slices:
-            # valid t must satisfy t-(L-1) >= s  and t+delta < e
             lo = s + (self.force_hist - 1)
-            hi = e - self.delta
+            hi = e - need_future
             if hi <= lo:
                 self.valid_ranges.append((0, 0))
                 self.transition_indices.append(np.zeros((0,), dtype=np.int64))
                 continue
 
-            y = np.array(self.event[s:e], dtype=np.int64)
-            # transitions at local index i where y[i]!=y[i-1], i in [1..len-1]
+            y = np.array(self.phase[s:e], dtype=np.int64)
             trans_local = np.nonzero(y[1:] != y[:-1])[0] + 1
             trans_global = trans_local + s
-
-            # keep only transitions that can be sampled (within valid t)
             trans_global = trans_global[(trans_global >= lo) & (trans_global < hi)]
             self.transition_indices.append(trans_global.astype(np.int64))
             self.valid_ranges.append((lo, hi))
 
-        # class counts for this split (for info)
-        self.class_counts = self._count_classes()
+        self.class_counts = self._count_phase()
+        self.contact_counts = self._count_contact()
 
-        # normalization
+        # norm
         if provided_norm is not None:
             self.norm = provided_norm
         else:
             self.norm = None
             if compute_norm:
                 self.norm = self._compute_norm(norm_samples)
-
         if self.norm is None:
-            # fallback safe defaults
             self.norm = NormStats(
                 wrench_mean=np.zeros((6,), np.float32),
                 wrench_std=np.ones((6,), np.float32),
@@ -177,21 +181,30 @@ class PAEPFutureDataset(Dataset):
                 pose_std=np.ones((9,), np.float32),
             )
 
-    def _count_classes(self) -> Dict[str, int]:
+    def _count_phase(self) -> Dict[str, int]:
         counts = np.zeros((NUM_EVENTS,), dtype=np.int64)
         for (s, e) in self.episode_slices:
-            y = np.array(self.event[s:e], dtype=np.int64)
+            y = np.array(self.phase[s:e], dtype=np.int64)
             for c in range(NUM_EVENTS):
                 counts[c] += np.sum(y == c)
         return {EVENT_NAMES[i]: int(counts[i]) for i in range(NUM_EVENTS)}
 
+    def _count_contact(self) -> Dict[str, int]:
+        free_cnt = 0
+        contact_cnt = 0
+        for (s, e) in self.episode_slices:
+            y = np.array(self.contact[s:e], dtype=np.int64)
+            free_cnt += int(np.sum(y == 0))
+            contact_cnt += int(np.sum(y == 1))
+        return {"free": free_cnt, "contact": contact_cnt}
+
     def _compute_norm(self, n: int) -> NormStats:
-        # sample random frames from valid ranges
         wrench_samples = []
         pose_samples = []
         total_episodes = len(self.episode_slices)
         if total_episodes == 0:
             raise RuntimeError("Empty split.")
+
         for _ in range(n):
             ep_idx = self.rng.randrange(total_episodes)
             lo, hi = self.valid_ranges[ep_idx]
@@ -208,58 +221,57 @@ class PAEPFutureDataset(Dataset):
         w_std = W.std(axis=0) + 1e-6
         p_mean = P.mean(axis=0)
         p_std = P.std(axis=0) + 1e-6
-        return NormStats(w_mean.astype(np.float32), w_std.astype(np.float32), p_mean.astype(np.float32), p_std.astype(np.float32))
+        return NormStats(w_mean.astype(np.float32), w_std.astype(np.float32),
+                         p_mean.astype(np.float32), p_std.astype(np.float32))
 
     def __len__(self):
-        # This dataset is used with "random sampling per step", so length is not meaningful.
-        # We'll return a large number; training loop controls steps/epoch.
+        # 用 steps_per_epoch 控制训练步数
         return 10**9
 
     def _sample_t(self) -> int:
-        # choose an episode first
         ep_i = self.rng.randrange(len(self.episode_slices))
         lo, hi = self.valid_ranges[ep_i]
         if hi <= lo:
-            # fallback to another ep
-            for _ in range(10):
+            for _ in range(20):
                 ep_i = self.rng.randrange(len(self.episode_slices))
                 lo, hi = self.valid_ranges[ep_i]
                 if hi > lo:
                     break
         if hi <= lo:
-            raise RuntimeError("No valid sampling range (force_hist/delta too large for episodes).")
+            raise RuntimeError("No valid sampling range. Check force_hist/delta/future_k vs episode length.")
 
         if self.transition_sampling and (self.rng.random() < self.transition_prob) and (len(self.transition_indices[ep_i]) > 0):
-            # sample near a transition
             t0 = int(self.transition_indices[ep_i][self.rng.randrange(len(self.transition_indices[ep_i]))])
-            # uniform in [t0-w, t0+w]
             w = self.transition_window
             t = t0 + self.rng.randint(-w, w)
             t = max(lo, min(hi - 1, t))
             return t
-        else:
-            return self.rng.randrange(lo, hi)
+
+        return self.rng.randrange(lo, hi)
 
     def __getitem__(self, idx: int):
         t = self._sample_t()
 
-        # images: uint8 HWC
         ext = np.array(self.ext[t], dtype=np.uint8)
         wrist = np.array(self.wrist[t], dtype=np.uint8)
 
-        # force history: [L,6] from t-L+1 .. t inclusive
         L = self.force_hist
         f0 = t - (L - 1)
-        wrench_hist = np.array(self.wrench[f0:t+1], dtype=np.float32)  # (L,6)
-        pose_t = np.array(self.pose[t], dtype=np.float32)  # (9,)
+        wrench_hist = np.array(self.wrench[f0:t + 1], dtype=np.float32)  # (L,6)
+        pose_t = np.array(self.pose[t], dtype=np.float32)                # (9,)
 
-        y = int(self.event[t + self.delta])  # future label
+        # targets
+        y_phase = int(self.phase[t + self.delta])  # single-step future
 
-        sample = {
-            "ext_img": torch.from_numpy(ext).permute(2, 0, 1).float() / 255.0,     # (3,H,W)
-            "wrist_img": torch.from_numpy(wrist).permute(2, 0, 1).float() / 255.0, # (3,H,W)
-            "wrench_hist": torch.from_numpy(wrench_hist),                          # (L,6)
-            "pose": torch.from_numpy(pose_t),                                      # (9,)
-            "y": torch.tensor(y, dtype=torch.long),
+        c_future = np.array(self.contact[t + 1: t + 1 + self.future_k], dtype=np.int64)  # length K
+        y_contact = 1.0 if (c_future.max() > 0) else 0.0
+
+        return {
+            "ext_img": torch.from_numpy(ext).permute(2, 0, 1).float() / 255.0,
+            "wrist_img": torch.from_numpy(wrist).permute(2, 0, 1).float() / 255.0,
+            "wrench_hist": torch.from_numpy(wrench_hist),
+            "pose": torch.from_numpy(pose_t),
+
+            "y_phase": torch.tensor(y_phase, dtype=torch.long),
+            "y_contact": torch.tensor([y_contact], dtype=torch.float32),  # (1,)
         }
-        return sample

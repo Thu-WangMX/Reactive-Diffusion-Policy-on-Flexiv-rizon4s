@@ -12,6 +12,8 @@ fuse.cfg
 
 *.ai
 
+PAEP/label_viz/
+PAEP/paep_future_ckpt/
 # Generation results
 results/
 
