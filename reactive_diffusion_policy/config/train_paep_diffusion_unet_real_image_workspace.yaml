@@ -2,8 +2,10 @@ defaults:
   - task: wmx_paep_real_wiping_board_image_dp_absolute_24fps
   - _self_
 
-name: train_paep_diffusion_unet_image_force
-_target_: reactive_diffusion_policy.workspace.train_diffusion_unet_image_workspace.TrainDiffusionUnetImageWorkspace
+name: train_paep_diffusion_unet_image_force_v2_0125
+#_target_: reactive_diffusion_policy.workspace.train_diffusion_unet_image_workspace.TrainDiffusionUnetImageWorkspace
+_target_: reactive_diffusion_policy.workspace.train_ours_diffusion_unet_image_force_workspace.TrainDiffusionUnetImageWorkspace
+
 
 task_name: ${task.name}
 shape_meta: ${task.shape_meta}
@@ -31,10 +33,10 @@ policy:
   gripper_key: left_robot_gripper_width
 
 
-  
+  training.save_epoch_ckpt_every: 100
 
   # ---- PAEP checkpoint ----
-  paep_ckpt: /home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/PAEP/paep_future_ckpt/paep_runs_0124/best.pt
+  paep_ckpt: /home/ubuntu/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/PAEP/best.pt
   gmin: 0.05
   freeze_paep: True
 
@@ -69,19 +71,19 @@ policy:
   #   imagenet_norm: True
 
   obs_encoder:
-  _target_: reactive_diffusion_policy.model.vision.clean_multi_image_obs_encoder.CleanMultiImageObsEncoder
-  shape_meta: ${shape_meta}
-  rgb_model:
-    _target_: reactive_diffusion_policy.model.vision.model_getter.get_resnet
-    name: resnet18
-    weights: null
-  resize_shape: [240, 320]
-  random_transforms:
-    - type: RandomCrop
-      ratio: 0.90
-  use_group_norm: True
-  share_rgb_model: False
-  imagenet_norm: True
+    _target_: reactive_diffusion_policy.model.vision.clean_multi_image_obs_encoder.CleanMultiImageObsEncoder
+    shape_meta: ${shape_meta}
+    rgb_model:
+      _target_: reactive_diffusion_policy.model.vision.model_getter.get_resnet
+      name: resnet18
+      weights: null
+    resize_shape: [240, 320]
+    random_transforms:
+      - type: RandomCrop
+        ratio: 0.90
+    use_group_norm: True
+    share_rgb_model: False
+    imagenet_norm: True
 
 
   # timm
@@ -237,6 +239,7 @@ training:
   # timm
   layer_decay: 1.0
   encoder_lr_coefficient: 0.1
+  save_epoch_ckpt_every: 100
 
 logging:
   project: paep_gated_diffusion_policy

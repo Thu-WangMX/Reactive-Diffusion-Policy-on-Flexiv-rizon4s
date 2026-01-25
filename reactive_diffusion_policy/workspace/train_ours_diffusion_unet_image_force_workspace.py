@@ -157,15 +157,29 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
         train_dataloader = DataLoader(dataset, **cfg.dataloader)
 
         # compute normalizer on the main process and save to disk
-        normalizer_path = os.path.join(self.output_dir, "normalizer.pkl")
-        if accelerator.is_main_process:
-            normalizer = dataset.get_normalizer()
-            with open(normalizer_path, "wb") as f:
-                pickle.dump(normalizer, f)
+        # normalizer_path = os.path.join(self.output_dir, "normalizer.pkl")
+        # if accelerator.is_main_process:
+        #     normalizer = dataset.get_normalizer()
+        #     with open(normalizer_path, "wb") as f:
+        #         pickle.dump(normalizer, f)
 
-        # load normalizer on all processes
+        # # load normalizer on all processes
+        # accelerator.wait_for_everyone()
+        # normalizer = pickle.load(open(normalizer_path, "rb"))
+        normalizer_path = os.path.join(self.output_dir, "normalizer.pkl")
+
+        if accelerator.is_main_process:
+            if os.path.exists(normalizer_path):
+                accelerator.print(f"[normalizer] Found existing {normalizer_path}, skip recompute.")
+            else:
+                normalizer = dataset.get_normalizer()
+                with open(normalizer_path, "wb") as f:
+                    pickle.dump(normalizer, f)
+                accelerator.print(f"[normalizer] Saved to {normalizer_path}")
+
         accelerator.wait_for_everyone()
         normalizer = pickle.load(open(normalizer_path, "rb"))
+
 
         # configure validation dataset
         val_dataset = dataset.get_validation_dataset()
@@ -380,7 +394,20 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
 
                 accelerator.wait_for_everyone()
 
-                # checkpoint (main only)
+                # ---- periodic epoch checkpoints (main only, NOT gated by checkpoint_every) ----
+                if accelerator.is_main_process:
+                    every = int(getattr(cfg.training, "save_epoch_ckpt_every", 0) or 0)
+                    if every > 0 and ((self.epoch + 1) % every == 0):
+                        ckpt_dir = os.path.join(self.output_dir, "checkpoints")
+                        os.makedirs(ckpt_dir, exist_ok=True)
+                        periodic_path = os.path.join(ckpt_dir, f"epoch={self.epoch+1:04d}.ckpt")
+
+                        model_wrapped = self.model
+                        self.model = accelerator.unwrap_model(self.model)
+                        self.save_checkpoint(path=periodic_path)
+                        self.model = model_wrapped
+
+                # ---- regular checkpointing (every checkpoint_every epochs) ----
                 if (self.epoch % cfg.training.checkpoint_every) == 0 and accelerator.is_main_process:
                     model_wrapped = self.model
                     self.model = accelerator.unwrap_model(self.model)
@@ -396,6 +423,7 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
                         self.save_checkpoint(path=topk_ckpt_path)
 
                     self.model = model_wrapped
+
 
                 # ========= eval end for this epoch ==========
                 policy.train()

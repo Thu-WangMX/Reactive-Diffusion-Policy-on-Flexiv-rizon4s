@@ -9,6 +9,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import reduce
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
+import inspect
 
 from reactive_diffusion_policy.model.common.normalizer import LinearNormalizer
 from reactive_diffusion_policy.policy.base_image_policy import BaseImagePolicy
@@ -170,6 +171,75 @@ class HeadWiseCrossAttention(nn.Module):
 #   - phase (and contact) -> head gate
 #   - force_global -> mild amplitude modulation (scalar ~1.0)
 # ============================================================
+# class DualGatedVisionForceFusion(nn.Module):
+#     def __init__(
+#         self,
+#         d_model: int,
+#         n_heads: int = 8,
+#         gate_hidden: int = 128,
+#         dropout: float = 0.0,
+#         use_contact_in_head_gate: bool = True,
+#     ):
+#         super().__init__()
+#         self.d_model = d_model
+#         self.n_heads = n_heads
+#         self.use_contact_in_head_gate = bool(use_contact_in_head_gate)
+
+#         self.cross_attn = HeadWiseCrossAttention(d_model=d_model, n_heads=n_heads, dropout=dropout)
+
+#         head_gate_in = 4 if self.use_contact_in_head_gate else 3  # [p_phase(3), p_contact(1)]
+#         self.head_gate_mlp = nn.Sequential(
+#             nn.Linear(head_gate_in, gate_hidden),
+#             nn.ReLU(inplace=True),
+#             nn.Linear(gate_hidden, n_heads),
+#         )
+
+#         self.amp_mlp = nn.Sequential(
+#             nn.Linear(d_model, gate_hidden),
+#             nn.ReLU(inplace=True),
+#             nn.Linear(gate_hidden, 1),
+#         )
+
+#         self._last_fusion_debug = None
+
+#     def forward(
+#         self,
+#         v_feat: torch.Tensor,          # (B,D)
+#         force_tokens: torch.Tensor,    # (B,L,D)
+#         force_global: torch.Tensor,    # (B,D)
+#         g_contact: torch.Tensor,       # (B,) in [0,1]
+#         p_phase: torch.Tensor,         # (B,3)
+#         p_contact: torch.Tensor,       # (B,1)
+#     ) -> torch.Tensor:
+#         v_tok = v_feat.unsqueeze(1)  # (B,1,D)
+
+#         if self.use_contact_in_head_gate:
+#             hg_in = torch.cat([p_phase, p_contact], dim=-1)  # (B,4)
+#         else:
+#             hg_in = p_phase  # (B,3)
+
+#         g_head = torch.sigmoid(self.head_gate_mlp(hg_in))  # (B,H)
+
+#         delta = self.cross_attn(v_tok, force_tokens, g_head)  # (B,1,D)
+
+#         amp = 1.0 + 0.1 * torch.tanh(self.amp_mlp(force_global)).squeeze(-1)  # (B,)
+#         inj = (g_contact * amp).clamp(0.0, 1.5)
+
+#         v_fused = v_tok + inj[:, None, None] * delta
+
+#         with torch.no_grad():
+#             dn = delta.squeeze(1).norm(dim=-1)
+#             vn = v_feat.norm(dim=-1)
+#             self._last_fusion_debug = {
+#                 "delta_norm_mean": dn.mean().detach(),
+#                 "v_norm_mean": vn.mean().detach(),
+#                 "inj_mean": inj.mean().detach(),
+#                 "inj_ratio_mean": ((inj * dn) / (vn + 1e-6)).mean().detach(),
+#                 "amp_mean": amp.mean().detach(),
+#             }
+
+#         return v_fused.squeeze(1)
+
 class DualGatedVisionForceFusion(nn.Module):
     def __init__(
         self,
@@ -178,15 +248,20 @@ class DualGatedVisionForceFusion(nn.Module):
         gate_hidden: int = 128,
         dropout: float = 0.0,
         use_contact_in_head_gate: bool = True,
+        # NEW
+        use_ln: bool = True,
+        ln_out: bool = True,
     ):
         super().__init__()
         self.d_model = d_model
         self.n_heads = n_heads
         self.use_contact_in_head_gate = bool(use_contact_in_head_gate)
+        self.use_ln = bool(use_ln)
+        self.use_ln_out = bool(ln_out)
 
         self.cross_attn = HeadWiseCrossAttention(d_model=d_model, n_heads=n_heads, dropout=dropout)
 
-        head_gate_in = 4 if self.use_contact_in_head_gate else 3  # [p_phase(3), p_contact(1)]
+        head_gate_in = 4 if self.use_contact_in_head_gate else 3
         self.head_gate_mlp = nn.Sequential(
             nn.Linear(head_gate_in, gate_hidden),
             nn.ReLU(inplace=True),
@@ -199,6 +274,21 @@ class DualGatedVisionForceFusion(nn.Module):
             nn.Linear(gate_hidden, 1),
         )
 
+        # ---- NEW: LayerNorms ----
+        if self.use_ln:
+            self.ln_v = nn.LayerNorm(d_model)
+            self.ln_force = nn.LayerNorm(d_model)
+            self.ln_force_global = nn.LayerNorm(d_model)   # ✅ NEW
+            self.ln_delta = nn.LayerNorm(d_model)
+            self.ln_out = nn.LayerNorm(d_model) if self.use_ln_out else nn.Identity()
+        else:
+            self.ln_v = nn.Identity()
+            self.ln_force = nn.Identity()
+            self.ln_force_global = nn.Identity()           # ✅ NEW
+            self.ln_delta = nn.Identity()
+            self.ln_out = nn.Identity()
+
+
         self._last_fusion_debug = None
 
     def forward(
@@ -206,36 +296,58 @@ class DualGatedVisionForceFusion(nn.Module):
         v_feat: torch.Tensor,          # (B,D)
         force_tokens: torch.Tensor,    # (B,L,D)
         force_global: torch.Tensor,    # (B,D)
-        g_contact: torch.Tensor,       # (B,) in [0,1]
+        g_contact: torch.Tensor,       # (B,)
         p_phase: torch.Tensor,         # (B,3)
         p_contact: torch.Tensor,       # (B,1)
     ) -> torch.Tensor:
         v_tok = v_feat.unsqueeze(1)  # (B,1,D)
 
+        # ---- NEW: pre-norm ----
+        v_tok_n = self.ln_v(v_tok)                      # (B,1,D)
+        force_tokens_n = self.ln_force(force_tokens)    # (B,L,D)
+
         if self.use_contact_in_head_gate:
-            hg_in = torch.cat([p_phase, p_contact], dim=-1)  # (B,4)
+            hg_in = torch.cat([p_phase, p_contact], dim=-1)
         else:
-            hg_in = p_phase  # (B,3)
+            hg_in = p_phase
 
         g_head = torch.sigmoid(self.head_gate_mlp(hg_in))  # (B,H)
 
-        delta = self.cross_attn(v_tok, force_tokens, g_head)  # (B,1,D)
+        # cross-attn uses normalized inputs
+        delta = self.cross_attn(v_tok_n, force_tokens_n, g_head)  # (B,1,D)
 
-        amp = 1.0 + 0.1 * torch.tanh(self.amp_mlp(force_global)).squeeze(-1)  # (B,)
+        # ---- NEW: normalize delta (关键!) ----
+        delta = self.ln_delta(delta)
+
+        # amp keeps using force_global (我不强制 LN 它，避免抹掉幅值信息)
+        force_global_n = self.ln_force_global(force_global)  # ✅ NEW
+        amp = 1.0 + 0.1 * torch.tanh(self.amp_mlp(force_global_n)).squeeze(-1)  # (B,)
         inj = (g_contact * amp).clamp(0.0, 1.5)
 
-        v_fused = v_tok + inj[:, None, None] * delta
+        v_fused = v_tok + inj[:, None, None] * delta  # residual add
+
+        # ---- NEW: post-norm ----
+        v_fused = self.ln_out(v_fused)
 
         with torch.no_grad():
             dn = delta.squeeze(1).norm(dim=-1)
             vn = v_feat.norm(dim=-1)
+            fgn = force_global_n.norm(dim=-1)
+            fg_mu = force_global_n.mean(dim=-1)
+            fg_std = force_global_n.std(dim=-1, unbiased=False)
             self._last_fusion_debug = {
                 "delta_norm_mean": dn.mean().detach(),
                 "v_norm_mean": vn.mean().detach(),
+
+                "force_global_n_norm_mean": fgn.mean().detach(),
+                "force_global_n_mu_mean": fg_mu.mean().detach(),
+                "force_global_n_std_mean": fg_std.mean().detach(),
+
                 "inj_mean": inj.mean().detach(),
                 "inj_ratio_mean": ((inj * dn) / (vn + 1e-6)).mean().detach(),
                 "amp_mean": amp.mean().detach(),
             }
+
 
         return v_fused.squeeze(1)
 
@@ -381,7 +493,10 @@ class PAEPGatedDiffusionUnetImageForcePolicy(BaseImagePolicy):
             gate_hidden=128,
             dropout=0.0,
             use_contact_in_head_gate=bool(head_gate_use_contact),
+            use_ln=True,
+            ln_out=False,   # ✅建议先关
         )
+
 
         # PAEP
         self.paep = PAEPFutureNet(num_events=3, img_pretrained=False)
@@ -585,6 +700,28 @@ class PAEPGatedDiffusionUnetImageForcePolicy(BaseImagePolicy):
     # ------------------------------------------------------------
     # Diffusion sampling
     # ------------------------------------------------------------
+    # def conditional_sample(self, condition_data, condition_mask, local_cond=None, global_cond=None, generator=None, **kwargs):
+    #     model = self.model
+    #     scheduler = self.noise_scheduler
+
+    #     trajectory = torch.randn(
+    #         size=condition_data.shape,
+    #         dtype=condition_data.dtype,
+    #         device=condition_data.device,
+    #         generator=generator,
+    #     )
+
+    #     scheduler.set_timesteps(self.num_inference_steps)
+
+    #     for t in scheduler.timesteps:
+    #         trajectory[condition_mask] = condition_data[condition_mask]
+    #         model_output = model(trajectory, t, local_cond=local_cond, global_cond=global_cond)
+    #         trajectory = scheduler.step(model_output, t, trajectory, generator=generator, **kwargs).prev_sample
+
+    #     trajectory[condition_mask] = condition_data[condition_mask]
+    #     return trajectory
+
+    
     def conditional_sample(self, condition_data, condition_mask, local_cond=None, global_cond=None, generator=None, **kwargs):
         model = self.model
         scheduler = self.noise_scheduler
@@ -598,13 +735,23 @@ class PAEPGatedDiffusionUnetImageForcePolicy(BaseImagePolicy):
 
         scheduler.set_timesteps(self.num_inference_steps)
 
+        # ✅ 只把 scheduler.step 支持的 kwargs 传进去
+        step_sig = inspect.signature(scheduler.step)
+        allowed = set(step_sig.parameters.keys())
+        step_kwargs = {k: v for k, v in kwargs.items() if k in allowed}
+
+        # 有些 scheduler.step 支持 generator，有些不支持；再保险一次
+        if "generator" in allowed:
+            step_kwargs["generator"] = generator
+
         for t in scheduler.timesteps:
             trajectory[condition_mask] = condition_data[condition_mask]
             model_output = model(trajectory, t, local_cond=local_cond, global_cond=global_cond)
-            trajectory = scheduler.step(model_output, t, trajectory, generator=generator, **kwargs).prev_sample
+            trajectory = scheduler.step(model_output, t, trajectory, **step_kwargs).prev_sample
 
         trajectory[condition_mask] = condition_data[condition_mask]
         return trajectory
+
 
     # ------------------------------------------------------------
     # Inference
@@ -730,7 +877,10 @@ class PAEPGatedDiffusionUnetImageForcePolicy(BaseImagePolicy):
 
             fd = getattr(self.fusion, "_last_fusion_debug", None)
             if isinstance(fd, dict):
-                for k in ["delta_norm_mean", "inj_mean", "inj_ratio_mean", "v_norm_mean", "amp_mean"]:
+                for k in [
+                    "delta_norm_mean", "inj_mean", "inj_ratio_mean", "v_norm_mean", "amp_mean",
+                    "force_global_n_norm_mean", "force_global_n_mu_mean", "force_global_n_std_mean",
+                ]:
                     if k in fd:
                         log_dict[f"debug/fusion_{k}"] = float(fd[k].detach().cpu())
 
@@ -739,6 +889,8 @@ class PAEPGatedDiffusionUnetImageForcePolicy(BaseImagePolicy):
                 for k in ["g_head_mean", "g_head_min", "g_head_max", "attn_max_mean", "attn_entropy_mean"]:
                     if k in ad:
                         log_dict[f"debug/attn_{k}"] = float(ad[k].detach().cpu())
+
+
 
             self._extra_step_log = log_dict
 

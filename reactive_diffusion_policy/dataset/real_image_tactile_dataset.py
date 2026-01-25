@@ -86,16 +86,33 @@ class RealImageTactileDataset(BaseImageDataset):
         relative_action=False,
         relative_tcp_obs_for_relative_action=True,
         transform_params=None,
-        # wrench history (dynamic, not stored in zarr)
+        # smoothing (legacy/optional)
+        action_smoothing_alpha: float = 0.0,
+        smooth_xyz_only: bool = False,
+        smooth_rot_only: bool = False,
+        smooth_rpy_only: bool = False,
+        # wrench history
         add_wrench_hist: bool = True,
         force_hist: int = 48,
         wrench_key: str = "left_robot_tcp_wrench",
         wrench_hist_key: str = "wrench_hist",
         wrench_hist_pad_mode: str = "repeat_first",
         debug_wrench_hist: bool = False,
+        # ✅ swallow any future args from hydra configs
+        **kwargs,
     ):
         assert os.path.isdir(dataset_path)
         assert (not add_wrench_hist) or (n_obs_steps is not None), "add_wrench_hist=True requires n_obs_steps."
+
+        # store (even if not used yet)
+        self.action_smoothing_alpha = float(action_smoothing_alpha)
+        self.smooth_xyz_only = bool(smooth_xyz_only)
+        self.smooth_rot_only = bool(smooth_rot_only)
+        self.smooth_rpy_only = bool(smooth_rpy_only)
+
+        # optionally warn about unused kwargs (main process only)
+        if len(kwargs) > 0:
+            print(f"[RealImageTactileDataset] Ignored extra kwargs: {list(kwargs.keys())}")
 
         # ---- parse shape meta ----
         rgb_keys = []

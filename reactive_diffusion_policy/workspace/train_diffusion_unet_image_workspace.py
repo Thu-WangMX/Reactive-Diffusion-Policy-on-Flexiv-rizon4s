@@ -352,6 +352,8 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
                     if cfg.checkpoint.save_last_snapshot:
                         self.save_snapshot()
 
+                        
+
                     # sanitize metric names
                     metric_dict = dict()
                     for key, value in step_log.items():
