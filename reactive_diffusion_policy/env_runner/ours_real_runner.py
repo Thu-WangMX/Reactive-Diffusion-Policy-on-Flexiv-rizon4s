@@ -540,6 +540,7 @@ class RealRunner:
                 logger.error("Failed to stop recording video")
 
     def run(self, policy: Union[DiffusionUnetImagePolicy]):
+        logger.info(f"[DBG] runner file = {os.path.abspath(__file__)}")
         if self.use_latent_action_with_rnn_decoder:
             assert policy.at.use_rnn_decoder, "Policy should use rnn decoder for latent action."
         else:
@@ -628,6 +629,16 @@ class RealRunner:
 
                         np_obs_dict = dict(obs)
 
+                        if step_count == 0:
+                            for k in ["external_img", "left_wrist_img"]:
+                                if k in np_obs_dict:
+                                    x = np.asarray(np_obs_dict[k])
+                                    logger.info(
+                                        f"[RAW_IMG] {k}: dtype={x.dtype} shape={x.shape} "
+                                        f"min={x.min()} max={x.max()} mean={x.mean():.4f}"
+                                    )
+
+
                         fz = _extract_fz_from_obs(np_obs_dict)
                         if fz is not None:
                             fz_log.append(fz)
@@ -635,6 +646,18 @@ class RealRunner:
                             csv_w.writerow([time.time(), step_count, fz])
 
                         np_obs_dict = get_real_obs_dict(env_obs=np_obs_dict, shape_meta=self.shape_meta)
+                        
+                        if step_count == 0:
+                            for k in ["external_img", "left_wrist_img"]:
+                                if k in np_obs_dict:
+                                    x = np.asarray(np_obs_dict[k])
+                                    logger.info(
+                                        f"[POLICY_IMG] {k}: dtype={x.dtype} shape={x.shape} "
+                                        f"min={x.min():.4f} max={x.max():.4f} mean={x.mean():.4f}"
+                                    )
+
+
+                        
                         np_obs_dict, np_absolute_obs_dict = self.pre_process_obs(np_obs_dict)
 
                         obs_dict = dict_apply(np_obs_dict, lambda x: torch.from_numpy(x).unsqueeze(0).to(device=device))
@@ -651,21 +674,112 @@ class RealRunner:
 
                         np_action_dict = dict_apply(action_dict, lambda x: x.detach().to("cpu").numpy())
 
-                        # --- PAEP event logging ---
-                        if "paep_event_id" in np_action_dict:
-                            ev_id = int(np.array(np_action_dict["paep_event_id"]).reshape(-1)[0])
-                            name = PAEP_EVENT_NAMES[ev_id] if ev_id < len(PAEP_EVENT_NAMES) else str(ev_id)
+                        # ---- DBG: how much force residual is injected into vision ----
+                        if (infer_step % 10) == 0:
+                            try:
+                                # try multiple possible paths to find fusion module
+                                fusion = None
+                                for cand in ["fusion", "model.fusion", "net.fusion", "policy.fusion"]:
+                                    obj = policy
+                                    ok = True
+                                    for part in cand.split("."):
+                                        if not hasattr(obj, part):
+                                            ok = False
+                                            break
+                                        obj = getattr(obj, part)
+                                    if ok:
+                                        fusion = obj
+                                        break
+
+                                if fusion is None:
+                                    # only print once in a while to avoid spamming
+                                    logger.info("[DBG][FUSION] fusion module not found on policy (tried fusion/model.fusion/net.fusion/policy.fusion)")
+                                else:
+                                    dd = getattr(fusion, "_last_fusion_debug", None)
+                                    if dd is None:
+                                        logger.info("[DBG][FUSION] fusion._last_fusion_debug is None (fusion found, but debug not produced)")
+                                    else:
+                                        # dd entries might be torch tensors; make safe float conversion
+                                        def _to_float(x):
+                                            try:
+                                                if torch.is_tensor(x):
+                                                    return float(x.detach().cpu().item())
+                                                return float(x)
+                                            except Exception:
+                                                return float("nan")
+
+                                        inj_mean = _to_float(dd.get("inj_mean", float("nan")))
+                                        delta_norm_mean = _to_float(dd.get("delta_norm_mean", float("nan")))
+                                        v_norm_mean = _to_float(dd.get("v_norm_mean", float("nan")))
+                                        inj_ratio_mean = _to_float(dd.get("inj_ratio_mean", float("nan")))
+                                        amp_mean = _to_float(dd.get("amp_mean", float("nan")))
+
+                                        dbg_msg = (
+                                            f"infer_step={infer_step} step={step_count} "
+                                            f"inj_mean={inj_mean:.3f} "
+                                            f"delta_norm_mean={delta_norm_mean:.3f} "
+                                            f"v_norm_mean={v_norm_mean:.3f} "
+                                            f"inj_ratio_mean={inj_ratio_mean:.3f} "
+                                            f"amp_mean={amp_mean:.3f}"
+                                        )
+
+                                        # terminal (loguru)
+                                        logger.info("[DBG][FUSION] " + dbg_msg)
+                                        # file (python logging -> same paep_events_*.log)
+                                        self.paep_logger.info("[DBG][FUSION] " + dbg_msg)
+                                        for h in self.paep_logger.handlers:
+                                            try:
+                                                h.flush()
+                                            except Exception:
+                                                pass
+
+                            except Exception as e:
+                                logger.warning(f"[DBG][FUSION] failed to read fusion debug: {e}")
+                                try:
+                                    self.paep_logger.info(f"[DBG][FUSION] failed to read fusion debug: {e}")
+                                    for h in self.paep_logger.handlers:
+                                        try:
+                                            h.flush()
+                                        except Exception:
+                                            pass
+                                except Exception:
+                                    pass
+
+
+                        # --- PAEP phase logging (policy v2) ---
+                        if "paep_phase_id" in np_action_dict:
+                            phase_id = int(np.array(np_action_dict["paep_phase_id"]).reshape(-1)[0])
+
+                            conf = float("nan")
+                            if "paep_phase_conf" in np_action_dict:
+                                conf = float(np.array(np_action_dict["paep_phase_conf"]).reshape(-1)[0])
 
                             g = float("nan")
                             if "paep_g_contact" in np_action_dict:
                                 g = float(np.array(np_action_dict["paep_g_contact"]).reshape(-1)[0])
 
-                            p = float("nan")
-                            if "paep_maxprob" in np_action_dict:
-                                p = float(np.array(np_action_dict["paep_maxprob"]).reshape(-1)[0])
+                            pc = float("nan")
+                            if "paep_p_contact" in np_action_dict:
+                                pc = float(np.array(np_action_dict["paep_p_contact"]).reshape(-1)[0])
 
-                            if (infer_step % 5) == 0:
-                                self.paep_logger.info(f"infer_step={infer_step} step={step_count} event={name}({ev_id}) g={g:.3f} maxp={p:.3f}")
+                            if (infer_step % 10) == 0 and "paep_p_phase" in np_action_dict:
+                                p = np_action_dict["paep_p_phase"].reshape(-1, 3)[0]
+                                fz_str = "nan" if fz is None else f"{fz:.3f}"
+                                msg = (
+                                    f"infer_step={infer_step} step={step_count} fz={fz_str} "
+                                    f"p_phase={p.tolist()} phase_id={phase_id} conf={conf:.3f} "
+                                    f"p_contact={pc:.3f} g={g:.3f}"
+                                )
+                                logger.info("[PAEP] " + msg)
+                                self.paep_logger.info(msg)
+                                for h in self.paep_logger.handlers:
+                                    try:
+                                        h.flush()
+                                    except Exception:
+                                        pass
+
+
+
 
                         action_all = np_action_dict["action"].squeeze(0)
 

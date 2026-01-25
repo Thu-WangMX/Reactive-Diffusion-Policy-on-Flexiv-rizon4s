@@ -1,3 +1,4 @@
+# real_image_tactile_dataset.py
 from typing import Dict
 import os
 import copy
@@ -19,33 +20,6 @@ from reactive_diffusion_policy.common.action_utils import (
 from reactive_diffusion_policy.real_world.real_world_transforms import RealWorldTransforms
 
 
-def _build_wrench_hist(wrench_seq: np.ndarray, hist_len: int, pad_mode: str = "repeat_first") -> np.ndarray:
-    """
-    Build per-timestep wrench history windows.
-
-    wrench_seq: (T, 6) float32
-    returns: (T, L, 6), right-aligned history ending at each t (inclusive)
-    """
-    assert wrench_seq.ndim == 2 and wrench_seq.shape[1] == 6, f"wrench_seq must be (T,6), got {wrench_seq.shape}"
-    T = wrench_seq.shape[0]
-    L = int(hist_len)
-    out = np.zeros((T, L, 6), dtype=np.float32)
-
-    for t in range(T):
-        s = max(0, t - L + 1)
-        seg = wrench_seq[s : t + 1]  # (<=L,6)
-        k = seg.shape[0]
-        out[t, -k:] = seg
-        if k < L:
-            if pad_mode == "repeat_first":
-                out[t, : L - k] = seg[:1]
-            elif pad_mode == "zeros":
-                pass
-            else:
-                raise ValueError(f"Unknown pad_mode={pad_mode}")
-    return out
-
-
 def _take_first_k_timeordered(x: np.ndarray, k: int, downsample_ratio: int) -> np.ndarray:
     """
     Match original behavior: take first k, then downsample by ratio, keep time order.
@@ -62,11 +36,11 @@ class RealImageTactileDataset(BaseImageDataset):
     """
     Real-world dataset with RGB + low-dim observations.
 
-    Key design for PAEP-guided vision-force fusion:
-    - Training horizon (e.g., 16) should NOT be increased.
-    - wrench_hist needs a longer history window: (n_obs_steps + force_hist - 1).
-    Therefore we use a dedicated `wrench_sampler` with a longer `sequence_length`,
-    while keeping the original sampler (and training horizon) unchanged.
+    PAEP-Force alignment (no SequenceSampler change):
+    - Image/low-dim obs follow obs_temporal_downsample_ratio (e.g., r=2 => 12Hz).
+    - Force history wrench_hist is ALWAYS dense (24Hz):
+        For each sparse obs frame time index, we fetch the last `force_hist` raw wrench frames
+        from replay_buffer directly, with correct episode-boundary padding.
     """
 
     def __init__(
@@ -98,19 +72,18 @@ class RealImageTactileDataset(BaseImageDataset):
         wrench_hist_key: str = "wrench_hist",
         wrench_hist_pad_mode: str = "repeat_first",
         debug_wrench_hist: bool = False,
-        # ✅ swallow any future args from hydra configs
+        # swallow any future args from hydra configs
         **kwargs,
     ):
         assert os.path.isdir(dataset_path)
         assert (not add_wrench_hist) or (n_obs_steps is not None), "add_wrench_hist=True requires n_obs_steps."
 
-        # store (even if not used yet)
+        # store
         self.action_smoothing_alpha = float(action_smoothing_alpha)
         self.smooth_xyz_only = bool(smooth_xyz_only)
         self.smooth_rot_only = bool(smooth_rot_only)
         self.smooth_rpy_only = bool(smooth_rpy_only)
 
-        # optionally warn about unused kwargs (main process only)
         if len(kwargs) > 0:
             print(f"[RealImageTactileDataset] Ignored extra kwargs: {list(kwargs.keys())}")
 
@@ -165,7 +138,7 @@ class RealImageTactileDataset(BaseImageDataset):
         self.force_hist = int(force_hist)
         self.wrench_key = wrench_key
         self.wrench_hist_key = wrench_hist_key
-        self.wrench_hist_pad_mode = wrench_hist_pad_mode
+        self.wrench_hist_pad_mode = str(wrench_hist_pad_mode)
         self.debug_wrench_hist = bool(debug_wrench_hist)
 
         self.shape_meta = shape_meta
@@ -193,68 +166,49 @@ class RealImageTactileDataset(BaseImageDataset):
 
         self.val_mask = val_mask
         self.replay_buffer = replay_buffer
+        self.episode_ends = replay_buffer.episode_ends[:]  # cache for fast episode-boundary queries
 
-        # ---- key_first_k (keep original behavior for short obs) ----
+        # ---- key_first_k ----
+        # IMPORTANT: do NOT set key_first_k for uint8 rgb keys if your SequenceSampler fills with NaN
+        # (since you said you won't edit SequenceSampler). Keep key_first_k only for float low-dim if you want.
         key_first_k: Dict[str, int] = dict()
         if self.n_obs_steps is not None:
-            for key in (rgb_keys + lowdim_keys):
-                if key not in (extended_rgb_keys + extended_lowdim_keys):
+            # keep perf hint for lowdim only (float), avoid rgb(uint8)
+            for key in (lowdim_keys):
+                if key not in (extended_lowdim_keys):
                     key_first_k[key] = self.n_obs_steps * self.obs_downsample_ratio
-            if self.add_wrench_hist:
-                long_k = (self.n_obs_steps + self.force_hist - 1) * self.obs_downsample_ratio
-                key_first_k[self.wrench_key] = long_k
         self.key_first_k = key_first_k
 
         # ---- samplers ----
+        # Use ONE sampler for all keys used normally (exclude wrench_key here; we fetch wrench directly)
+        sampler_keys = set(rgb_keys + lowdim_keys + extended_rgb_keys + extended_lowdim_keys + ["action"])
+        sampler_keys = list(sampler_keys)
+
         self.sampler = SequenceSampler(
             replay_buffer=replay_buffer,
             sequence_length=self.horizon + self.n_latency_steps,
             pad_before=self.pad_before,
             pad_after=self.pad_after,
             episode_mask=train_mask,
+            keys=sampler_keys,
             key_first_k=key_first_k,
         )
 
-        self.wrench_sampler = None
-        if self.add_wrench_hist:
-            long_seq_len = max(
-                self.horizon + self.n_latency_steps,
-                (self.n_obs_steps + self.force_hist - 1) * self.obs_downsample_ratio,
-            )
-            self.wrench_sampler = SequenceSampler(
-                replay_buffer=replay_buffer,
-                sequence_length=long_seq_len,
-                pad_before=self.pad_before,
-                pad_after=self.pad_after,
-                episode_mask=train_mask,
-                key_first_k=key_first_k,
-            )
-
     def get_validation_dataset(self):
         val_set = copy.copy(self)
+
+        sampler_keys = set(self.rgb_keys + self.lowdim_keys + self.extended_rgb_keys + self.extended_lowdim_keys + ["action"])
+        sampler_keys = list(sampler_keys)
+
         val_set.sampler = SequenceSampler(
             replay_buffer=self.replay_buffer,
             sequence_length=self.horizon + self.n_latency_steps,
             pad_before=self.pad_before,
             pad_after=self.pad_after,
             episode_mask=self.val_mask,
+            keys=sampler_keys,
             key_first_k=self.key_first_k,
         )
-        if self.add_wrench_hist:
-            long_seq_len = max(
-                self.horizon + self.n_latency_steps,
-                (self.n_obs_steps + self.force_hist - 1) * self.obs_downsample_ratio,
-            )
-            val_set.wrench_sampler = SequenceSampler(
-                replay_buffer=self.replay_buffer,
-                sequence_length=long_seq_len,
-                pad_before=self.pad_before,
-                pad_after=self.pad_after,
-                episode_mask=self.val_mask,
-                key_first_k=self.key_first_k,
-            )
-        else:
-            val_set.wrench_sampler = None
         val_set.val_mask = ~self.val_mask
         return val_set
 
@@ -298,7 +252,7 @@ class RealImageTactileDataset(BaseImageDataset):
             action_all = self.replay_buffer["action"][:, : self.shape_meta["action"]["shape"][0]]
         normalizer["action"] = get_action_normalizer(action_all)
 
-        # obs (note: wrench_hist is NOT in shape_meta, so not normalized here)
+        # obs (wrench_hist NOT normalized here)
         for key in list(set(self.lowdim_keys)):
             if self.relative_action and ("relative_data_dict" in locals()) and (key in relative_data_dict):
                 normalizer[key] = get_action_normalizer(relative_data_dict[key])
@@ -342,18 +296,65 @@ class RealImageTactileDataset(BaseImageDataset):
     def get_all_actions(self) -> torch.Tensor:
         return torch.from_numpy(self.replay_buffer["action"][:, : self.shape_meta["action"]["shape"][0]])
 
-    # def __len__(self):
-    #     return len(self.sampler)
     def __len__(self):
-        if getattr(self, "add_wrench_hist", False) and hasattr(self, "wrench_sampler") and self.wrench_sampler is not None:
-            return len(self.wrench_sampler)
         return len(self.sampler)
+
+    def _episode_bounds_for_index(self, abs_idx: int):
+        """
+        Given an absolute replay_buffer index, return (ep_start, ep_end_exclusive).
+        """
+        # episode_ends: [end0, end1, ...] (exclusive)
+        # find smallest end > abs_idx
+        ep_id = int(np.searchsorted(self.episode_ends, abs_idx, side="right"))
+        ep_start = 0 if ep_id == 0 else int(self.episode_ends[ep_id - 1])
+        ep_end = int(self.episode_ends[ep_id])
+        return ep_start, ep_end
+
+    def _fetch_wrench_window(self, abs_end_idx: int) -> np.ndarray:
+        """
+        Fetch a (L,6) wrench window ending at abs_end_idx (inclusive), dense 24Hz.
+        Pads on the LEFT at episode start using repeat_first or zeros.
+        """
+        L = int(self.force_hist)
+        ep_start, ep_end = self._episode_bounds_for_index(abs_end_idx)
+
+        # clamp end inside episode
+        abs_end_idx = int(np.clip(abs_end_idx, ep_start, ep_end - 1))
+
+        start_idx = abs_end_idx - (L - 1)
+        fetch_start = max(ep_start, start_idx)
+
+        seg = self.replay_buffer[self.wrench_key][fetch_start : abs_end_idx + 1, :6].astype(np.float32)
+        k = seg.shape[0]
+
+        out = np.zeros((L, 6), dtype=np.float32)
+        out[-k:] = seg
+
+        if k < L:
+            pad_n = L - k
+            if self.wrench_hist_pad_mode == "repeat_first":
+                if k > 0:
+                    out[:pad_n] = seg[:1]
+                else:
+                    # no data at all (should be rare)
+                    out[:pad_n] = 0.0
+            elif self.wrench_hist_pad_mode == "zeros":
+                pass
+            else:
+                raise ValueError(f"Unknown wrench_hist_pad_mode={self.wrench_hist_pad_mode}")
+
+        return out
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         threadpool_limits(1)
 
-        # short sequence for training (keeps horizon unchanged)
         data = self.sampler.sample_sequence(idx)
+        # indices: (buffer_start_idx, buffer_end_idx, sample_start_idx, sample_end_idx)
+        buffer_start_idx, buffer_end_idx, sample_start_idx, sample_end_idx = self.sampler.indices[idx]
+        buffer_start_idx = int(buffer_start_idx)
+        buffer_end_idx = int(buffer_end_idx)
+        sample_start_idx = int(sample_start_idx)
+        sample_end_idx = int(sample_end_idx)
 
         To = int(self.n_obs_steps) if self.n_obs_steps is not None else None
         ratio = int(self.obs_downsample_ratio)
@@ -362,7 +363,7 @@ class RealImageTactileDataset(BaseImageDataset):
 
         # --- RGB ---
         for key in self.rgb_keys:
-            x = data[key]
+            x = data[key]  # (T,H,W,C)
             x = _take_first_k_timeordered(x, To * ratio if To is not None else None, ratio)
             obs_dict[key] = np.moveaxis(x, -1, 1).astype(np.float32) / 255.0
             if key not in self.extended_rgb_keys:
@@ -394,40 +395,34 @@ class RealImageTactileDataset(BaseImageDataset):
                 extended_obs_dict[key] = data[key][:, : self.shape_meta["extended_obs"][key]["shape"][0]].astype(np.float32)
                 del data[key]
 
-        # --- NEW: wrench_hist (dynamic) ---
+        # --- NEW: wrench_hist (dense 24Hz, aligned to sparse obs frames) ---
         if self.add_wrench_hist:
-            assert self.wrench_sampler is not None, "wrench_sampler must be initialized when add_wrench_hist=True."
-            w_data = self.wrench_sampler.sample_sequence(idx)
-            if self.wrench_key not in w_data:
-                raise KeyError(
-                    f"wrench_key '{self.wrench_key}' not found in wrench_sampler output. "
-                    f"Ensure it exists in replay_buffer and zarr_load_keys."
-                )
+            assert To is not None, "n_obs_steps must be set when add_wrench_hist=True."
 
-            long_To = To + self.force_hist - 1
-            w_raw = w_data[self.wrench_key][:, :6]  # (T_long,6) but may be shorter near episode boundaries
+            # We align wrench windows to the SAME sparse time positions used by _take_first_k_timeordered.
+            # In the padded sampler sequence, the sparse frames correspond to indices:
+            #   end positions = [k-1-(To-1)*ratio, ..., k-1] within the first k = To*ratio steps.
+            k = To * ratio
+            end_positions = np.arange(k - 1 - (To - 1) * ratio, k, ratio)  # length To, increasing
 
-            # downsample/time-order + truncate
-            w_long = _take_first_k_timeordered(w_raw, long_To * ratio, ratio).astype(np.float32)
+            def pos_to_abs_idx(pos: int) -> int:
+                # map a position in the padded sample [0, sequence_length-1] to absolute replay idx
+                if pos < sample_start_idx:
+                    return buffer_start_idx
+                if pos >= sample_end_idx:
+                    return buffer_end_idx - 1
+                return buffer_start_idx + (pos - sample_start_idx)
 
-            # robust padding if still shorter than required
-            if w_long.shape[0] < long_To:
-                pad_n = long_To - w_long.shape[0]
-                if w_long.shape[0] > 0:
-                    pad_val = w_long[:1]
-                else:
-                    pad_val = np.zeros((1, 6), dtype=np.float32)
-                w_long = np.concatenate([np.repeat(pad_val, pad_n, axis=0), w_long], axis=0)
-
-            w_hist_full = _build_wrench_hist(
-                wrench_seq=w_long, hist_len=self.force_hist, pad_mode=self.wrench_hist_pad_mode
-            )
-            obs_dict[self.wrench_hist_key] = w_hist_full[self.force_hist - 1 : self.force_hist - 1 + To]  # (To,L,6)
+            end_abs = [pos_to_abs_idx(int(p)) for p in end_positions]
+            w_hist = np.stack([self._fetch_wrench_window(t) for t in end_abs], axis=0)  # (To,L,6)
+            obs_dict[self.wrench_hist_key] = w_hist.astype(np.float32)
 
             if self.debug_wrench_hist:
+                fz = w_hist[..., 2]
                 print(
-                    f"[wrench_hist] idx={idx} raw_len={w_raw.shape[0]} w_long={w_long.shape[0]} "
-                    f"hist_full={w_hist_full.shape[0]} final={obs_dict[self.wrench_hist_key].shape}"
+                    f"[wrench_hist] idx={idx} To={To} ratio={ratio} k={k} "
+                    f"end_pos={end_positions.tolist()} end_abs={end_abs} "
+                    f"fz(min,max,mean)=({fz.min():.3f},{fz.max():.3f},{fz.mean():.3f})"
                 )
 
         # --- Action ---
