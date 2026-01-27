@@ -17,8 +17,9 @@ from reactive_diffusion_policy.policy.base_image_policy import BaseImagePolicy
 from reactive_diffusion_policy.model.diffusion.conditional_unet1d import ConditionalUnet1D
 from reactive_diffusion_policy.model.diffusion.mask_generator import LowdimMaskGenerator
 from reactive_diffusion_policy.common.pytorch_util import dict_apply
-
-
+from reactive_diffusion_policy.model.force.force_encoder import ForceTCNTokenEncoder
+from reactive_diffusion_policy.model.attention.headwise_cro_attention import HeadWiseCrossAttention
+from reactive_diffusion_policy.model.force.dual_gated_v_f_fusion_v3 import DualGatedVisionForceFusion
 # ----------------------------
 # Robust PAEP import
 # ----------------------------
@@ -62,330 +63,6 @@ def imagenet_normalize(x: torch.Tensor) -> torch.Tensor:
     if x.dim() == 4:
         return (x - mean.unsqueeze(0)) / std.unsqueeze(0)
     raise ValueError(f"Unexpected x.dim={x.dim()}")
-
-
-# ============================================================
-# Force TCN token encoder: (B,L,6) -> (B,L,D)
-#   + returns force_global = mean(L)
-# ============================================================
-class ForceTCNTokenEncoder(nn.Module):
-    def __init__(
-        self,
-        in_dim: int = 6,
-        d_model: int = 256,
-        hidden: int = 256,
-        kernel_size: int = 5,
-        num_blocks: int = 4,
-        dropout: float = 0.0,
-    ):
-        super().__init__()
-        self.in_proj = nn.Conv1d(in_dim, hidden, kernel_size=1)
-        blocks = []
-        for i in range(num_blocks):
-            dilation = 2 ** i
-            pad = (kernel_size - 1) * dilation
-            blocks.append(nn.Sequential(
-                nn.Conv1d(hidden, hidden, kernel_size, padding=pad, dilation=dilation),
-                nn.ReLU(inplace=True),
-                nn.Dropout(dropout),
-                nn.Conv1d(hidden, hidden, kernel_size=1),
-                nn.ReLU(inplace=True),
-            ))
-        self.blocks = nn.ModuleList(blocks)
-        self.out_proj = nn.Linear(hidden, d_model)
-        self.res_scale = 0.1
-
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        # x: (B,L,6)
-        x = x.transpose(1, 2)      # (B,6,L)
-        h = self.in_proj(x)        # (B,H,L)
-        for blk in self.blocks:
-            y = blk(h)
-            if y.shape[-1] != h.shape[-1]:
-                y = y[..., -h.shape[-1]:]
-            h = h + self.res_scale * y
-        h = h.transpose(1, 2)      # (B,L,H)
-        tokens = self.out_proj(h)  # (B,L,D)
-        force_global = tokens.mean(dim=1)  # (B,D)
-        return tokens, force_global
-
-
-# ============================================================
-# Head-wise cross attention with per-head gating
-# ============================================================
-class HeadWiseCrossAttention(nn.Module):
-    """
-    Q: (B, Nq, D)   usually Nq=1
-    KV: (B, Nk, D)
-    gate_h: (B, H) in [0,1]
-    """
-    def __init__(self, d_model: int, n_heads: int, dropout: float = 0.0):
-        super().__init__()
-        assert d_model % n_heads == 0
-        self.d_model = d_model
-        self.n_heads = n_heads
-        self.d_head = d_model // n_heads
-
-        self.q_proj = nn.Linear(d_model, d_model)
-        self.k_proj = nn.Linear(d_model, d_model)
-        self.v_proj = nn.Linear(d_model, d_model)
-        self.out_proj = nn.Linear(d_model, d_model)
-        self.drop = nn.Dropout(dropout)
-
-        self._last_attn_debug = None
-
-    def forward(self, q: torch.Tensor, kv: torch.Tensor, gate_h: torch.Tensor) -> torch.Tensor:
-        B, Nq, D = q.shape
-        _, Nk, _ = kv.shape
-        H = self.n_heads
-        dh = self.d_head
-
-        qh = self.q_proj(q).view(B, Nq, H, dh).transpose(1, 2)     # (B,H,Nq,dh)
-        kh = self.k_proj(kv).view(B, Nk, H, dh).transpose(1, 2)    # (B,H,Nk,dh)
-        vh = self.v_proj(kv).view(B, Nk, H, dh).transpose(1, 2)    # (B,H,Nk,dh)
-
-        attn = torch.matmul(qh, kh.transpose(-2, -1)) / math.sqrt(dh)  # (B,H,Nq,Nk)
-        w = torch.softmax(attn, dim=-1)
-        w = self.drop(w)
-
-        out = torch.matmul(w, vh)  # (B,H,Nq,dh)
-        out = out * gate_h[:, :, None, None]
-
-        out = out.transpose(1, 2).contiguous().view(B, Nq, D)
-        y = self.out_proj(out)
-
-        with torch.no_grad():
-            self._last_attn_debug = {
-                "g_head_mean": gate_h.mean().detach(),
-                "g_head_min": gate_h.min().detach(),
-                "g_head_max": gate_h.max().detach(),
-                "attn_max_mean": w.max(dim=-1).values.mean().detach(),
-                "attn_entropy_mean": (-(w.clamp_min(1e-9).log() * w).sum(dim=-1)).mean().detach(),
-            }
-
-        return y
-
-
-
-class DualGatedVisionForceFusion(nn.Module):
-    """
-    Dual-gated fusion = (1) head-wise gate inside cross-attn + (2) contact gate on injection.
-    Now includes a *norm-ratio injection limiter*:
-      - We interpret inj as "target relative strength" (ratio of ||injected|| to ||vision||)
-      - Hard cap r: realized injected norm ratio <= r (per-sample)
-    """
-
-    def __init__(
-        self,
-        d_model: int,
-        n_heads: int = 8,
-        gate_hidden: int = 128,
-        dropout: float = 0.0,
-        use_contact_in_head_gate: bool = True,
-        # LN switches
-        use_ln: bool = True,
-        ln_out: bool = True,
-        # NEW: norm-ratio injection cap
-        inj_ratio_cap: float = 1.0,          # r: injected norm <= r * vision norm
-        inj_ratio_floor: float = 0.0,        # optional: floor (usually 0)
-        eps: float = 1e-6,
-        # Debug
-        enable_debug: bool = True,
-    ):
-        super().__init__()
-        self.d_model = int(d_model)
-        self.n_heads = int(n_heads)
-        self.use_contact_in_head_gate = bool(use_contact_in_head_gate)
-        self.use_ln = bool(use_ln)
-        self.use_ln_out = bool(ln_out)
-
-        self.inj_ratio_cap = float(inj_ratio_cap)
-        self.inj_ratio_floor = float(inj_ratio_floor)
-        self.eps = float(eps)
-        self.enable_debug = bool(enable_debug)
-
-        self.cross_attn = HeadWiseCrossAttention(d_model=d_model, n_heads=n_heads, dropout=dropout)
-
-        head_gate_in = 4 if self.use_contact_in_head_gate else 3
-        self.head_gate_mlp = nn.Sequential(
-            nn.Linear(head_gate_in, gate_hidden),
-            nn.ReLU(inplace=True),
-            nn.Linear(gate_hidden, n_heads),
-        )
-
-        self.amp_mlp = nn.Sequential(
-            nn.Linear(d_model, gate_hidden),
-            nn.ReLU(inplace=True),
-            nn.Linear(gate_hidden, 1),
-        )
-
-        # ---- LayerNorms ----
-        if self.use_ln:
-            self.ln_v = nn.LayerNorm(d_model)
-            self.ln_force = nn.LayerNorm(d_model)
-            self.ln_force_global = nn.LayerNorm(d_model)
-            self.ln_delta = nn.LayerNorm(d_model)
-            self.ln_out = nn.LayerNorm(d_model) if self.use_ln_out else nn.Identity()
-        else:
-            self.ln_v = nn.Identity()
-            self.ln_force = nn.Identity()
-            self.ln_force_global = nn.Identity()
-            self.ln_delta = nn.Identity()
-            self.ln_out = nn.Identity()
-
-        self._last_fusion_debug = None
-
-    def forward(
-        self,
-        v_feat: torch.Tensor,          # (B,D)
-        force_tokens: torch.Tensor,    # (B,L,D)
-        force_global: torch.Tensor,    # (B,D)
-        g_contact: torch.Tensor,       # (B,)
-        p_phase: torch.Tensor,         # (B,3)
-        p_contact: torch.Tensor,       # (B,1)
-    ) -> torch.Tensor:
-        """
-        Returns: (B,D)
-        """
-        B = v_feat.shape[0]
-        eps = self.eps
-
-        # ---- vision token ----
-        v_tok = v_feat.unsqueeze(1)  # (B,1,D)
-
-        # ---- pre-norm inputs to cross-attn ----
-        v_tok_n = self.ln_v(v_tok)                      # (B,1,D)
-        force_tokens_n = self.ln_force(force_tokens)    # (B,L,D)
-
-        # ---- head-wise gate (gate-2) ----
-        if self.use_contact_in_head_gate:
-            hg_in = torch.cat([p_phase, p_contact], dim=-1)  # (B,4)
-        else:
-            hg_in = p_phase                                  # (B,3)
-        g_head = torch.sigmoid(self.head_gate_mlp(hg_in))    # (B,H)
-
-        # ---- cross-attn delta ----
-        delta = self.cross_attn(v_tok_n, force_tokens_n, g_head)  # (B,1,D)
-        delta = self.ln_delta(delta)                               # stabilize direction/scale in feature space
-
-        # ---- contact gate + amp (gate-1) ----
-        # NOTE: we keep a small amp range; you can widen later if needed.
-        force_global_n = self.ln_force_global(force_global)
-        amp = 1.0 + 0.1 * torch.tanh(self.amp_mlp(force_global_n)).squeeze(-1)  # (B,)
-        inj_raw = (g_contact * amp)                                             # (B,)
-
-        # =====================================================================
-        # NEW: Norm-ratio injection limiter (core)
-        # inj_raw is treated as "target ratio": ||injected|| / ||vision||
-        # We enforce realized_ratio <= inj_ratio_cap by scaling delta accordingly.
-        # =====================================================================
-
-        # Token-wise norms
-        v_norm = v_tok.norm(dim=-1, keepdim=True).clamp_min(eps)     # (B,1,1)
-        d_norm = delta.norm(dim=-1, keepdim=True).clamp_min(eps)     # (B,1,1)
-
-        # clamp target ratio
-        r_cap = self.inj_ratio_cap
-        r_floor = self.inj_ratio_floor
-        effective_ratio = torch.clamp(inj_raw, min=r_floor, max=r_cap)  # (B,)
-
-        # scale so that ||scale*delta|| = effective_ratio * ||v||
-        # scale shape: (B,1,1)
-        scale = (effective_ratio[:, None, None] * (v_norm / d_norm))
-
-        # fused
-        injected = scale * delta
-        v_fused = v_tok + injected
-
-        # post norm
-        v_fused = self.ln_out(v_fused)
-
-        # ---- debug ----
-        if self.enable_debug:
-            with torch.no_grad():
-                # squeeze norms
-                vn = v_norm.squeeze(-1).squeeze(-1)  # (B,)
-                dn = d_norm.squeeze(-1).squeeze(-1)  # (B,)
-
-                inj_norm = injected.norm(dim=-1).squeeze(1)  # (B,)
-                realized_ratio = inj_norm / (vn + eps)       # (B,)
-
-                # head gate stats
-                gh = g_head  # (B,H)
-
-                # phase/contact summaries
-                # (avoid argmax here if you don't want discontinuous stats; but useful for debugging)
-                phase_id = torch.argmax(p_phase, dim=-1) if p_phase.ndim == 2 else None  # (B,)
-
-                # delta alignment with v (rough indicator; cosine over token dim)
-                v_dir = v_tok.squeeze(1)
-                d_dir = delta.squeeze(1)
-                cos_vd = torch.sum(
-                    v_dir * d_dir, dim=-1
-                ) / (v_dir.norm(dim=-1) * d_dir.norm(dim=-1) + eps)  # (B,)
-
-                # aggregate force_global stats
-                fgn = force_global_n.norm(dim=-1)
-                fg_mu = force_global_n.mean(dim=-1)
-                fg_std = force_global_n.std(dim=-1, unbiased=False)
-
-                # scale stats
-                sc = scale.squeeze(1).squeeze(1)  # (B,)
-                self._last_fusion_debug = {
-                    # norms
-                    "v_norm_mean": vn.mean().detach(),
-                    "v_norm_max": vn.max().detach(),
-                    "delta_norm_mean": dn.mean().detach(),
-                    "delta_norm_max": dn.max().detach(),
-                    "inj_norm_mean": inj_norm.mean().detach(),
-                    "inj_norm_max": inj_norm.max().detach(),
-
-                    # ratios
-                    "inj_raw_mean": inj_raw.mean().detach(),
-                    "inj_raw_max": inj_raw.max().detach(),
-                    "effective_ratio_mean": effective_ratio.mean().detach(),
-                    "effective_ratio_max": effective_ratio.max().detach(),
-                    "realized_ratio_mean": realized_ratio.mean().detach(),
-                    "realized_ratio_max": realized_ratio.max().detach(),
-                    "inj_ratio_cap": torch.tensor(self.inj_ratio_cap, device=vn.device),
-
-                    # scale (coefficient applied to delta)
-                    "scale_mean": sc.mean().detach(),
-                    "scale_max": sc.max().detach(),
-                    "scale_min": sc.min().detach(),
-
-                    # gates
-                    "g_contact_mean": g_contact.mean().detach(),
-                    "g_contact_max": g_contact.max().detach(),
-                    "amp_mean": amp.mean().detach(),
-                    "amp_max": amp.max().detach(),
-                    "g_head_mean": gh.mean().detach(),
-                    "g_head_min": gh.min().detach(),
-                    "g_head_max": gh.max().detach(),
-
-                    # direction/alignment indicators
-                    "cos_v_delta_mean": cos_vd.mean().detach(),
-                    "cos_v_delta_min": cos_vd.min().detach(),
-                    "cos_v_delta_max": cos_vd.max().detach(),
-
-                    # force_global_n stats
-                    "force_global_n_norm_mean": fgn.mean().detach(),
-                    "force_global_n_mu_mean": fg_mu.mean().detach(),
-                    "force_global_n_std_mean": fg_std.mean().detach(),
-
-                    # phase/contact quick sanity
-                    "p_contact_mean": p_contact.mean().detach(),
-                    "p_contact_max": p_contact.max().detach(),
-                }
-
-                if phase_id is not None:
-                    # fraction per phase id (0/1/2)
-                    for k in [0, 1, 2]:
-                        self._last_fusion_debug[f"phase_id_eq_{k}_frac"] = (phase_id == k).float().mean().detach()
-
-        return v_fused.squeeze(1)
-
-
 
 # ============================================================
 # Policy
@@ -529,7 +206,8 @@ class PAEPGatedDiffusionUnetImageForcePolicy(BaseImagePolicy):
             dropout=0.0,
             use_contact_in_head_gate=bool(head_gate_use_contact),
             use_ln=True,
-            ln_out=False,   # ✅建议先关
+            ln_out=False, 
+            enable_debug=False   # ✅建议先关
         )
 
 
@@ -639,11 +317,15 @@ class PAEPGatedDiffusionUnetImageForcePolicy(BaseImagePolicy):
         ext_n = ext_img
         wrist_n = wrist_img###训练的时候就没做imagenet_normalize！！！！！推理的时候做的话，会导致paep输出错误！！
 
+        # ---- FIX: ensure PAEP inputs dtype matches PAEP weights (float32) ----
+        wrench_hist = wrench_hist.to(dtype=ext_img.dtype)
+        pose = pose.to(dtype=ext_img.dtype)
+
         out = self.paep(
-            ext_n, wrist_n, wrench_hist, pose,
-            norm=self._paep_norm_dict(device=ext_img.device, dtype=ext_img.dtype),
-            img_size=self.paep_img_size,
-        )
+                ext_n, wrist_n, wrench_hist, pose,
+                norm=self._paep_norm_dict(device=ext_img.device, dtype=ext_img.dtype),
+                img_size=self.paep_img_size,
+            )
         # out: {"p_phase":(B,3), "p_contact":(B,1)}
         p_phase = out["p_phase"]
         p_contact = out["p_contact"]

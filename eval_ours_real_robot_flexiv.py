@@ -147,29 +147,38 @@ def _configure_inference(policy, cfg):
     return policy
 
 
-# ----------------- Online wrench_hist wrapper -----------------
+# ----------------- Online wrench_hist wrapper (FIXED) -----------------
 class WrenchHistWrapper(torch.nn.Module):
     """
-    Inject wrench_hist online for real-robot inference.
+    Build wrench_hist (B,To,L,6) online with correct per-frame end alignment.
 
-    Key idea:
-    - Real obs provides left_robot_tcp_wrench: (B, To, 6), where To = n_obs_steps (often 2)
-    - Training expects wrench_hist: (B, To, L, 6) with L=48 history (typically at control_fps)
-    - We approximate updating history at control_fps by appending only the newest frames per inference:
-        steps_per_inference = control_fps // inference_fps
-      and repeating a single latest history window over To.
-
-    Assumes B=1 for real robot.
+    - Maintain an internal dense wrench buffer (approx control_fps).
+    - For each obs frame i (0..To-1), build a history window ending at:
+        end = latest_dense_idx - (To-1-i)*obs_ratio
+      which matches the dataset logic when obs is downsampled by obs_ratio.
     """
 
-    def __init__(self, policy, wrench_key="left_robot_tcp_wrench", wrench_hist_key="wrench_hist", L=48, steps_per_inference=2):
+    def __init__(
+        self,
+        policy,
+        wrench_key="left_robot_tcp_wrench",
+        wrench_hist_key="wrench_hist",
+        L=48,
+        steps_per_inference=2,          # r = control_fps // inference_fps
+        obs_ratio=2,                    # obs_temporal_downsample_ratio
+    ):
         super().__init__()
-        self.add_module("policy", policy)   # ✅ 注册到 _modules
+        self.add_module("policy", policy)
         self.wrench_key = wrench_key
         self.wrench_hist_key = wrench_hist_key
         self.L = int(L)
-        self.steps_per_inference = int(steps_per_inference)
-        self.buf = deque(maxlen=self.L)
+        self.r = int(steps_per_inference)
+        self.obs_ratio = int(obs_ratio)
+
+        # IMPORTANT: need a bit MORE than L to support earlier end points when To>1
+        # (e.g., To=2, obs_ratio=2 => earliest end is 2 steps before latest end)
+        extra = max(8, (self.obs_ratio * 4) + self.r + 4)
+        self.buf = deque(maxlen=self.L + extra)  # store (B,6) tensors, B is assumed 1
 
     def eval(self):
         self.policy.eval()
@@ -187,30 +196,13 @@ class WrenchHistWrapper(torch.nn.Module):
     def num_inference_steps(self, v):
         self.policy.num_inference_steps = v
 
-    
     def __getattr__(self, name):
-        # 先让 nn.Module 自己处理（会查 _parameters/_buffers/_modules）
         try:
             return super().__getattr__(name)
         except AttributeError:
-            inner = super().__getattr__("policy")   # ✅ 关键：从 _modules 里拿
+            inner = super().__getattr__("policy")
             return getattr(inner, name)
 
-    
-    @property
-    def device(self):
-        inner = super().__getattr__("policy")
-        try:
-            return next(inner.parameters()).device
-        except StopIteration:
-            return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        
-    def reset(self, *args, **kwargs):
-        self.buf.clear()
-        inner = super().__getattr__("policy")
-        if hasattr(inner, "reset"):
-            return inner.reset(*args, **kwargs)
-        
     def _cast_obs_fp32(self, obs_dict):
         out = {}
         for k, v in obs_dict.items():
@@ -219,6 +211,101 @@ class WrenchHistWrapper(torch.nn.Module):
             else:
                 out[k] = v
         return out
+
+    def reset(self, *args, **kwargs):
+        self.buf.clear()
+        inner = super().__getattr__("policy")
+        if hasattr(inner, "reset"):
+            return inner.reset(*args, **kwargs)
+
+    def _append_dense_samples(self, w_seq: torch.Tensor):
+        """
+        Append ~r dense wrench samples to buffer.
+
+        We use last two obs frames (if available) to interpolate missing control steps.
+        Typical setting: control_fps=24, inference_fps=8 => r=3; obs_ratio=2; To=2
+        obs provides w(t-2) and w(t). We approximate:
+          [w(t-2), mid(t-1), w(t)]  (3 samples)  -> matches r=3
+        """
+        B, To, _ = w_seq.shape
+        assert B == 1
+
+        w_cur = w_seq[:, -1].detach().to(torch.float32)  # (1,6)
+
+        # init buffer if empty
+        if len(self.buf) == 0:
+            for _ in range(self.L):
+                self.buf.append(w_cur)
+
+        # if we have previous obs frame, interpolate
+        if To >= 2 and self.obs_ratio >= 1:
+            w_prev = w_seq[:, -2].detach().to(torch.float32)  # (1,6)
+
+            # build samples that cover [t-obs_ratio .. t] with obs_ratio steps
+            # interp points: j=1..obs_ratio => includes w_cur at the end
+            interp = []
+            for j in range(1, self.obs_ratio + 1):
+                alpha = float(j) / float(self.obs_ratio)
+                interp.append(w_prev + (w_cur - w_prev) * alpha)  # (1,6)
+
+            # candidate dense block: include w_prev then interpolated steps to w_cur
+            dense = [w_prev] + interp  # length = obs_ratio+1
+
+            # we only need to append r samples for "since last inference"
+            if self.r <= len(dense):
+                dense_to_add = dense[-self.r:]
+            else:
+                # not enough: pad by repeating earliest
+                pad_n = self.r - len(dense)
+                dense_to_add = [dense[0]] * pad_n + dense
+
+            for x in dense_to_add:
+                self.buf.append(x)
+        else:
+            # fallback: repeat current
+            for _ in range(max(1, self.r)):
+                self.buf.append(w_cur)
+
+    def _build_hist_per_frame(self, To: int, device: torch.device):
+        """
+        Build (B,To,L,6) with different end points per obs frame.
+        """
+        # ensure enough length (pad left with first)
+        if len(self.buf) < self.L + (To - 1) * self.obs_ratio + 1:
+            first = self.buf[0]
+            need = (self.L + (To - 1) * self.obs_ratio + 1) - len(self.buf)
+            for _ in range(need):
+                self.buf.appendleft(first)
+
+        buf_list = list(self.buf)  # list of (1,6)
+        N = len(buf_list)
+        B = 1
+
+        hists = []
+        for i in range(To):
+            # i=To-1 is latest obs frame => end_offset=0
+            end_offset = (To - 1 - i) * self.obs_ratio
+            end_idx = (N - 1) - end_offset
+            start_idx = end_idx - (self.L - 1)
+
+            if start_idx < 0:
+                pad = [buf_list[0]] * (-start_idx)
+                seg = pad + buf_list[0:end_idx + 1]
+            else:
+                seg = buf_list[start_idx:end_idx + 1]
+
+            # seg length should be L
+            if len(seg) != self.L:
+                if len(seg) < self.L:
+                    seg = [seg[0]] * (self.L - len(seg)) + seg
+                else:
+                    seg = seg[-self.L:]
+
+            stacked = torch.cat(seg, dim=0)          # (L,6) because each item is (1,6)
+            hists.append(stacked.unsqueeze(0))       # (1,L,6)
+
+        wrench_hist = torch.stack(hists, dim=1)      # (1,To,L,6)
+        return wrench_hist.to(device=device, dtype=torch.float32)
 
     def predict_action(self, obs_dict):
         # already has wrench_hist
@@ -229,43 +316,23 @@ class WrenchHistWrapper(torch.nn.Module):
             raise KeyError(f"Missing {self.wrench_key} in obs_dict keys={list(obs_dict.keys())}")
 
         w_seq = obs_dict[self.wrench_key]  # (B, To, 6)
-        w_seq = w_seq.to(torch.float32)
         if not (isinstance(w_seq, torch.Tensor) and w_seq.ndim == 3 and w_seq.shape[-1] == 6):
             raise RuntimeError(f"expect {self.wrench_key} as torch.Tensor (B,To,6), got {type(w_seq)} shape={getattr(w_seq,'shape',None)}")
 
+        w_seq = w_seq.to(torch.float32)
         B, To, _ = w_seq.shape
         if B != 1:
             raise RuntimeError(f"This wrapper assumes B=1 for real robot, got B={B}")
 
         device = w_seq.device
-        dtype = w_seq.dtype
 
-        # ---- init buffer if empty ----
-        if len(self.buf) == 0:
-            wt0 = w_seq[:, -1].detach().to(torch.float32)
-            for _ in range(self.L):
-                self.buf.append(wt0)
+        # 1) update dense buffer
+        self._append_dense_samples(w_seq)
 
-        # ---- append newest frames corresponding to last r control steps ----
-        r = max(1, int(self.steps_per_inference))
+        # 2) build per-frame history windows (NOT repeated)
+        wrench_hist = self._build_hist_per_frame(To=To, device=device)
 
-        # 用最新一帧 wrench 近似补齐这次推理间隔内的 r 个 control step
-        wt = w_seq[:, -1].detach().to(torch.float32)  # (B,6) 这里 B=1
-
-        for _ in range(r):
-            self.buf.append(wt)
-
-        # ---- build latest (L,6) history window ----
-        stacked = torch.cat(list(self.buf), dim=0)  # (<=L,6)
-        if stacked.shape[0] < self.L:
-            pad = stacked[0:1].repeat(self.L - stacked.shape[0], 1)
-            stacked = torch.cat([pad, stacked], dim=0)  # (L,6)
-
-        # repeat over To: (B,To,L,6)
-        wrench_hist = stacked.unsqueeze(0).unsqueeze(0).repeat(B, To, 1, 1)
-        wrench_hist = wrench_hist.to(device=device, dtype=torch.float32)
-        
-        obs_dict = self._cast_obs_fp32(obs_dict)  
+        obs_dict = self._cast_obs_fp32(obs_dict)
         obs_dict = dict(obs_dict)
         obs_dict[self.wrench_hist_key] = wrench_hist
 
@@ -273,6 +340,7 @@ class WrenchHistWrapper(torch.nn.Module):
 
     def forward(self, *args, **kwargs):
         return self.policy(*args, **kwargs)
+
 
 
 # ----------------- Hydra entry -----------------
@@ -338,19 +406,24 @@ def main(cfg):
 
     # 5) wrap policy to inject wrench_hist online
     control_fps = int(getattr(cfg.task.env_runner, "control_fps", 24))
-    inference_fps = int(getattr(cfg.task.env_runner, "inference_fps", 12))
+    inference_fps = int(getattr(cfg.task.env_runner, "inference_fps", 8))
     if control_fps % inference_fps != 0:
         raise RuntimeError(f"control_fps ({control_fps}) must be divisible by inference_fps ({inference_fps})")
 
+    
     r = int(control_fps // inference_fps)
+    obs_ratio = int(getattr(cfg.task.env_runner, "obs_temporal_downsample_ratio", 2))
+
     policy = WrenchHistWrapper(
         policy,
         wrench_key="left_robot_tcp_wrench",
         wrench_hist_key="wrench_hist",
         L=48,
         steps_per_inference=r,
+        obs_ratio=obs_ratio,
     )
-    print(f"[Eval] control_fps={control_fps}, inference_fps={inference_fps}, r={r}")
+    print(f"[Eval] control_fps={control_fps}, inference_fps={inference_fps}, r={r}, obs_ratio={obs_ratio}")
+
     print(f"[Eval] num_inference_steps={getattr(policy, 'num_inference_steps', None)}")
     print(f"[Eval] device={device}")
 

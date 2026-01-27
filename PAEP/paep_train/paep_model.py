@@ -7,6 +7,7 @@ import torch.nn.functional as F
 from torchvision.models import resnet18, ResNet18_Weights
 
 
+
 # =========================
 # Force Encoders
 # =========================

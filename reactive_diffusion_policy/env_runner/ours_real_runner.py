@@ -17,7 +17,7 @@ from omegaconf import DictConfig, ListConfig
 from reactive_diffusion_policy.policy.diffusion_unet_image_policy import DiffusionUnetImagePolicy
 from reactive_diffusion_policy.common.pytorch_util import dict_apply
 from reactive_diffusion_policy.common.precise_sleep import precise_sleep
-from reactive_diffusion_policy.env.real_bimanual.real_env import RealRobotEnvironment
+from reactive_diffusion_policy.env.real_bimanual.ours_real_env import RealRobotEnvironment
 from reactive_diffusion_policy.real_world.real_inference_util import get_real_obs_dict
 from reactive_diffusion_policy.real_world.real_world_transforms import RealWorldTransforms
 from reactive_diffusion_policy.common.space_utils import ortho6d_to_rotation_matrix
@@ -37,6 +37,7 @@ import csv
 import json
 import logging
 import cv2
+from collections import deque
 
 __all__ = ["RealRunner"]
 
@@ -150,6 +151,9 @@ class RealRunner:
         # ---- smoothing ----
         action_smoothing_alpha: float = 0.0,   # 0 => off, e.g. 0.15 for on
         smooth_xyz_only: bool = True,
+        # ---- dense wrench buffer (24Hz) ----
+        enable_dense_wrench_hist: bool = True,
+        force_hist: int = 48,
     ):
         self.task_name = task_name
         self.transforms = RealWorldTransforms(option=transform_params)
@@ -183,6 +187,14 @@ class RealRunner:
 
         self._fz_run_ts = None
         self._fz_run_dir = None
+
+        self.debug_path = os.path.join(self.output_dir, "debug_run.jsonl")
+
+        self._dbg_f = open(self.debug_path, "a", buffering=1)
+
+        self._dbg_step = 0
+
+        def _dbg(self, tag, **kw): json.dump({...}, self._dbg_f); self._dbg_f.write("\n")
 
         # --- rclpy/env ---
         rclpy.init(args=None)
@@ -278,6 +290,13 @@ class RealRunner:
         # --- locks ---
         self.tcp_buf_lock = threading.Lock()
         self.grip_buf_lock = threading.Lock()
+
+        # --- dense wrench buffer (24Hz) ---
+        self.enable_dense_wrench_hist = bool(enable_dense_wrench_hist)
+        self.force_hist = int(force_hist)
+        self._wrench_dense_buf = deque(maxlen=self.force_hist + 64)  # store (6,)
+        self._wrench_stop = threading.Event()
+        self._wrench_thread = None
 
     def _setup_paep_logger(self, output_dir: str):
         os.makedirs(output_dir, exist_ok=True)
@@ -509,8 +528,6 @@ class RealRunner:
                 else:
                     if self.smooth_xyz_only:
                         sm = step_action.copy()
-                        # left xyz: 0:3 , right xyz: 8:11 (because left 8 dims +2? here action_all is 16 dims)
-                        # safer: smooth first 3 only; keep others
                         sm[:3] = (1 - a) * self._last_step_action[:3] + a * step_action[:3]
                         step_action = sm
                     else:
@@ -538,6 +555,82 @@ class RealRunner:
                 logger.info("Stop recording video")
             else:
                 logger.error("Failed to stop recording video")
+
+    # ---------------------------------------------------------------------
+    # Dense wrench polling (24Hz) -> build dataset-aligned wrench_hist
+    # ---------------------------------------------------------------------
+    def _wrench_poll_thread(self):
+        """Poll env.latest_left_robot_tcp_wrench at control_fps and push into deque."""
+        dt = self.control_interval_time  # 1/control_fps
+        self._wrench_stop.clear()
+        last = None
+        while not self._wrench_stop.is_set():
+            t0 = time.time()
+            # fast-path: read cached wrench updated in RealRobotEnvironment.callback()
+            try:
+                with self.env.mutex:
+                    w = getattr(self.env, "latest_left_robot_tcp_wrench", None)
+            except Exception:
+                w = None
+
+            if w is None:
+                w = last
+            else:
+                last = w
+
+            if w is not None:
+                self._wrench_dense_buf.append(np.asarray(w, dtype=np.float32).reshape(-1)[:6])
+
+            precise_sleep(max(0.0, dt - (time.time() - t0)))
+
+    def _start_dense_wrench_polling(self):
+        if not self.enable_dense_wrench_hist:
+            return
+        self._wrench_dense_buf.clear()
+        self._wrench_stop.clear()
+        self._wrench_thread = threading.Thread(target=self._wrench_poll_thread, daemon=True)
+        self._wrench_thread.start()
+
+    def _stop_dense_wrench_polling(self):
+        if not self.enable_dense_wrench_hist:
+            return
+        if self._wrench_thread is None:
+            return
+        self._wrench_stop.set()
+        try:
+            self._wrench_thread.join(timeout=1.0)
+        except Exception:
+            pass
+        self._wrench_thread = None
+
+    def _build_wrench_hist_from_dense(self, To: int):
+        """
+        Always build (To, L, 6). If dense buffer is short, pad on the left with the earliest sample.
+        Per-frame end alignment:
+        end_offset = (To-1-i) * obs_ratio
+        """
+        L = int(self.force_hist)
+        obs_ratio = int(self.obs_temporal_downsample_ratio)
+
+        buf = list(self._wrench_dense_buf)
+        if len(buf) == 0:
+            return None  # 真没拿到任何 wrench，就只能缺一次（通常不会发生）
+
+        need = L + (To - 1) * obs_ratio + 1
+        if len(buf) < need:
+            pad = [buf[0]] * (need - len(buf))
+            buf = pad + buf
+
+        N = len(buf)
+        out = np.zeros((To, L, 6), dtype=np.float32)
+        for i in range(To):
+            end_offset = (To - 1 - i) * obs_ratio
+            end = (N - 1) - end_offset
+            start = end - (L - 1)
+            out[i] = np.stack(buf[start:end + 1], axis=0)
+        return out
+
+
 
     def run(self, policy: Union[DiffusionUnetImagePolicy]):
         logger.info(f"[DBG] runner file = {os.path.abspath(__file__)}")
@@ -603,6 +696,9 @@ class RealRunner:
                 self._none_streak = 0
                 self.action_step_count = 0
 
+                # ---- start 24Hz wrench polling thread (for dense wrench_hist) ----
+                self._start_dense_wrench_polling()
+
                 time.sleep(0.5)
                 action_thread = threading.Thread(target=self.action_command_thread, args=(policy, self.stop_event), daemon=True)
                 action_thread.start()
@@ -638,7 +734,6 @@ class RealRunner:
                                         f"min={x.min()} max={x.max()} mean={x.mean():.4f}"
                                     )
 
-
                         fz = _extract_fz_from_obs(np_obs_dict)
                         if fz is not None:
                             fz_log.append(fz)
@@ -646,7 +741,7 @@ class RealRunner:
                             csv_w.writerow([time.time(), step_count, fz])
 
                         np_obs_dict = get_real_obs_dict(env_obs=np_obs_dict, shape_meta=self.shape_meta)
-                        
+
                         if step_count == 0:
                             for k in ["external_img", "left_wrist_img"]:
                                 if k in np_obs_dict:
@@ -656,11 +751,19 @@ class RealRunner:
                                         f"min={x.min():.4f} max={x.max():.4f} mean={x.mean():.4f}"
                                     )
 
-
-                        
                         np_obs_dict, np_absolute_obs_dict = self.pre_process_obs(np_obs_dict)
 
                         obs_dict = dict_apply(np_obs_dict, lambda x: torch.from_numpy(x).unsqueeze(0).to(device=device))
+
+                        # ---- inject wrench_hist (B,To,L,6) for training/deploy consistency ----
+                        if self.enable_dense_wrench_hist:
+                            try:
+                                To = int(obs_dict["left_robot_tcp_wrench"].shape[1]) if "left_robot_tcp_wrench" in obs_dict else int(self.n_obs_steps)
+                                wh = self._build_wrench_hist_from_dense(To=To)
+                                if wh is not None:
+                                    obs_dict["wrench_hist"] = torch.from_numpy(wh).unsqueeze(0).to(device=device)
+                            except Exception as e:
+                                logger.warning(f"[WRENCH_HIST] build/inject failed: {e}")
 
                         with torch.no_grad():
                             if self.use_latent_action_with_rnn_decoder:
@@ -673,9 +776,8 @@ class RealRunner:
                                 action_dict = policy.predict_action(obs_dict)
 
                         np_action_dict = dict_apply(action_dict, lambda x: x.detach().to("cpu").numpy())
-
                         # ---- DBG: how much force residual is injected into vision ----
-                        if (infer_step % 10) == 0:
+                        if (infer_step % 1) == 0:
                             try:
                                 # try multiple possible paths to find fusion module
                                 fusion = None
@@ -692,40 +794,74 @@ class RealRunner:
                                         break
 
                                 if fusion is None:
-                                    # only print once in a while to avoid spamming
                                     logger.info("[DBG][FUSION] fusion module not found on policy (tried fusion/model.fusion/net.fusion/policy.fusion)")
                                 else:
                                     dd = getattr(fusion, "_last_fusion_debug", None)
                                     if dd is None:
                                         logger.info("[DBG][FUSION] fusion._last_fusion_debug is None (fusion found, but debug not produced)")
                                     else:
-                                        # dd entries might be torch tensors; make safe float conversion
-                                        def _to_float(x):
+                                        def _to_float(x, default=float("nan")):
                                             try:
+                                                if x is None:
+                                                    return float(default)
                                                 if torch.is_tensor(x):
-                                                    return float(x.detach().cpu().item())
+                                                    x = x.detach()
+                                                    if x.numel() == 1:
+                                                        return float(x.cpu().item())
+                                                    # fallback: mean
+                                                    return float(x.float().mean().cpu().item())
                                                 return float(x)
                                             except Exception:
-                                                return float("nan")
+                                                return float(default)
 
-                                        inj_mean = _to_float(dd.get("inj_mean", float("nan")))
-                                        delta_norm_mean = _to_float(dd.get("delta_norm_mean", float("nan")))
-                                        v_norm_mean = _to_float(dd.get("v_norm_mean", float("nan")))
-                                        inj_ratio_mean = _to_float(dd.get("inj_ratio_mean", float("nan")))
-                                        amp_mean = _to_float(dd.get("amp_mean", float("nan")))
+                                        # ---- pull numbers from fusion debug dict (your fusion stores these keys) ----
+                                        v_norm_mean = _to_float(dd.get("v_norm_mean"))
+                                        v_norm_max  = _to_float(dd.get("v_norm_max"))
+                                        d_norm_mean = _to_float(dd.get("delta_norm_mean"))
+                                        d_norm_max  = _to_float(dd.get("delta_norm_max"))
+                                        inj_norm_mean = _to_float(dd.get("inj_norm_mean"))
+                                        inj_norm_max  = _to_float(dd.get("inj_norm_max"))
+
+                                        inj_raw_mean = _to_float(dd.get("inj_raw_mean"))
+                                        eff_ratio_mean = _to_float(dd.get("effective_ratio_mean"))
+                                        realized_ratio_mean = _to_float(dd.get("realized_ratio_mean"))
+
+                                        g_contact_mean = _to_float(dd.get("g_contact_mean"))
+                                        amp_mean = _to_float(dd.get("amp_mean"))
+                                        p_contact_mean = _to_float(dd.get("p_contact_mean"))
+
+                                        cos_mean = _to_float(dd.get("cos_v_delta_mean"))
+                                        cos_min  = _to_float(dd.get("cos_v_delta_min"))
+                                        cos_max  = _to_float(dd.get("cos_v_delta_max"))
+
+                                        scale_mean = _to_float(dd.get("scale_mean"))
+                                        scale_min  = _to_float(dd.get("scale_min"))
+                                        scale_max  = _to_float(dd.get("scale_max"))
+
+                                        # optional: if you also log soft phase means in fusion debug, they will appear here
+                                        p0 = _to_float(dd.get("p_phase0_mean"))
+                                        p1 = _to_float(dd.get("p_phase1_mean"))
+                                        p2 = _to_float(dd.get("p_phase2_mean"))
+
+                                        # derived ratios (what you care about)
+                                        eps_ = 1e-6
+                                        delta_over_v = d_norm_mean / (v_norm_mean + eps_)
+                                        inj_over_v   = inj_norm_mean / (v_norm_mean + eps_)
 
                                         dbg_msg = (
                                             f"infer_step={infer_step} step={step_count} "
-                                            f"inj_mean={inj_mean:.3f} "
-                                            f"delta_norm_mean={delta_norm_mean:.3f} "
-                                            f"v_norm_mean={v_norm_mean:.3f} "
-                                            f"inj_ratio_mean={inj_ratio_mean:.3f} "
-                                            f"amp_mean={amp_mean:.3f}"
+                                            f"v_norm_mean={v_norm_mean:.3f} v_norm_max={v_norm_max:.3f} "
+                                            f"delta_norm_mean={d_norm_mean:.3f} delta_norm_max={d_norm_max:.3f} "
+                                            f"inj_norm_mean={inj_norm_mean:.3f} inj_norm_max={inj_norm_max:.3f} "
+                                            f"delta_over_v={delta_over_v:.3f} inj_over_v={inj_over_v:.3f} "
+                                            f"inj_raw_mean={inj_raw_mean:.3f} eff_ratio_mean={eff_ratio_mean:.3f} realized_ratio_mean={realized_ratio_mean:.3f} "
+                                            f"g_contact_mean={g_contact_mean:.3f} amp_mean={amp_mean:.3f} p_contact_mean={p_contact_mean:.3f} "
+                                            f"cos_vd_mean={cos_mean:.3f} cos_vd_min={cos_min:.3f} cos_vd_max={cos_max:.3f} "
+                                            f"scale_mean={scale_mean:.4f} scale_min={scale_min:.4f} scale_max={scale_max:.4f} "
+                                            f"p_phase_mean=[{p0:.3f},{p1:.3f},{p2:.3f}]"
                                         )
 
-                                        # terminal (loguru)
                                         logger.info("[DBG][FUSION] " + dbg_msg)
-                                        # file (python logging -> same paep_events_*.log)
                                         self.paep_logger.info("[DBG][FUSION] " + dbg_msg)
                                         for h in self.paep_logger.handlers:
                                             try:
@@ -777,9 +913,6 @@ class RealRunner:
                                         h.flush()
                                     except Exception:
                                         pass
-
-
-
 
                         action_all = np_action_dict["action"].squeeze(0)
 
@@ -928,6 +1061,8 @@ class RealRunner:
                     logger.warning("KeyboardInterrupt! Terminate the episode now!")
                 finally:
                     self.stop_event.set()
+                    # ---- stop 24Hz wrench polling thread ----
+                    self._stop_dense_wrench_polling()
 
                     try:
                         csv_f.flush()
@@ -938,18 +1073,33 @@ class RealRunner:
                     npy_path = osp.join(self._fz_run_dir, f"episode_{episode_idx:03d}_left_tcp_fz.npy")
                     np.save(npy_path, np.asarray(fz_log, dtype=np.float32))
 
+                    # ---- ask user to label episode success/failure (for later grouping cos stats) ----
+                    try:
+                        episode_success = py_cli_interaction.parse_cli_bool(
+                            "Was this episode successful? (y/n)",
+                            default_value=True
+                        )
+                    except Exception:
+                        episode_success = None
+
+                    # ---- write meta (include episode_success) ----
+                    meta = {
+                        "policy": self.policy_name,
+                        "run_timestamp": self._fz_run_ts,
+                        "episode_idx": episode_idx,
+                        "episode_success": episode_success,
+                        "csv_path": csv_path,
+                        "npy_path": npy_path,
+                        "step": fz_step_log,
+                        "n": len(fz_log),
+                        "source_key": "left_robot_tcp_wrench (or compatible) index 2 => Fz",
+                    }
+
                     with open(meta_path, "w") as f:
-                        json.dump({
-                            "policy": self.policy_name,
-                            "run_timestamp": self._fz_run_ts,
-                            "episode_idx": episode_idx,
-                            "csv_path": csv_path,
-                            "npy_path": npy_path,
-                            "step": fz_step_log,
-                            "n": len(fz_log),
-                            "source_key": "left_robot_tcp_wrench (or compatible) index 2 => Fz",
-                        }, f, indent=2)
+                        json.dump(meta, f, indent=2)
+
                     logger.info(f"[FZ] saved: {csv_path} (+ npy/meta)")
+
 
                     action_thread.join()
 
@@ -957,7 +1107,6 @@ class RealRunner:
                         self.stop_record_video()
                     self.env.save_exp(episode_idx)
 
-            spin_thread.join()
         finally:
             self.env.destroy_node()
 # ====== END ======

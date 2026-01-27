@@ -29,12 +29,12 @@ echo "正在评估策略类型: ${POLICY_TYPE}"
 
 
 
-PAEP-guided dual-gated vision-force fusion diffusion policy
+#PAEP-guided dual-gated vision-force fusion diffusion policy
 python eval_ours_real_robot_flexiv.py \
   --config-name train_paep_diffusion_unet_real_image_workspace \
   task=wmx_paep_real_wiping_board_image_dp_absolute_24fps \
   +task.env_runner.output_dir=/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/video/PAEP_v2 \
-  +diff_ckpt_path=/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/ckpt/OURS_v2/transfer_files/epoch0300.ckpt \
+  +diff_ckpt_path=/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/ckpt/OURS_v3_0126/epoch0400.ckpt \
   +paep_ckpt_path=/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/PAEP/paep_future_ckpt/paep_runs_0124/best.pt \
-  +num_inference_steps=8
+  +num_inference_steps=10
 

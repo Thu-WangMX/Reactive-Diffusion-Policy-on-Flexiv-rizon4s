@@ -64,7 +64,7 @@ env_runner:
   # control_fps: 12        # DP 控制频率
   control_fps: 24        # 修改
   #inference_fps: 6
-  inference_fps: 8 #每 2 个 control step 推理一次
+  inference_fps: 8 #每 3 个 control step 推理一次
   n_obs_steps: ${n_obs_steps}
   obs_temporal_downsample_ratio: 2
   task_name: ${task_name}
