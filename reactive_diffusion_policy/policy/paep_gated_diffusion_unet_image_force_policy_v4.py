@@ -727,21 +727,23 @@ class PAEPGatedDiffusionUnetImageForcePolicy(BaseImagePolicy):
         loss = reduce(loss, "b ... -> b (...) ", "mean")
         loss = loss.mean()
 
+       
         # optional debug log stash (won't affect DP training loop unless you use it)
         self._train_step += 1
         if isinstance(self._last_debug, dict):
             dbg = self._last_debug
             try:
-                self._extra_step_log = {
-                    "debug/g_contact_mean": float(dbg["g_contact"].mean().detach().cpu()),
-                    "debug/g_contact_min": float(dbg["g_contact"].min().detach().cpu()),
-                    "debug/g_contact_max": float(dbg["g_contact"].max().detach().cpu()),
-                    "debug/p_contact_mean": float(dbg["p_contact"].mean().detach().cpu()),
-                    "debug/p_contact_min": float(dbg["p_contact"].min().detach().cpu()),
-                    "debug/p_contact_max": float(dbg["p_contact"].max().detach().cpu()),
-                }
+                # 使用 _push_extra_log 追加数据，而不是覆盖整个字典
+                self._push_extra_log({
+                    "debug/g_contact_mean": dbg["g_contact"].mean(),
+                    "debug/g_contact_min": dbg["g_contact"].min(),
+                    "debug/g_contact_max": dbg["g_contact"].max(),
+                    "debug/p_contact_mean": dbg["p_contact"].mean(),
+                    "debug/p_contact_min": dbg["p_contact"].min(),
+                    "debug/p_contact_max": dbg["p_contact"].max(),
+                })
             except Exception:
-                self._extra_step_log = None
+                pass
 
         return loss
 
