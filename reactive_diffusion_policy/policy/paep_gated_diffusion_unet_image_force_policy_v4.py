@@ -1,4 +1,5 @@
 # reactive_diffusion_policy/policy/paep_gated_diffusion_unet_image_force_policy_v4.py
+import torch.distributed as dist
 from typing import Dict, Tuple, Optional
 import importlib.util
 from pathlib import Path
@@ -311,31 +312,60 @@ class PAEPGatedDiffusionUnetImageForcePolicy(BaseImagePolicy):
 
 
             # dp: use normalizer if key exists, else keep float/255 for uint8
-            if isinstance(k, str) and self._has_norm_key(k):
+            # dp:
+            #   - rgb: 强制保持 [0,1]（因为 encoder 里还会 imagenet_norm）
+            #   - 其它 low_dim: 走 normalizer（如果存在）
+            if isinstance(k, str) and (k in self.rgb_keys):
+                obs_dp[k] = obs_raw[k]  # [0,1]，不再做 2x-1
+            elif isinstance(k, str) and self._has_norm_key(k):
                 obs_dp[k] = self.normalizer[k].normalize(v)
             else:
                 obs_dp[k] = v if (torch.is_tensor(v) and v.dtype != torch.uint8) else (v.float() / 255.0)
+
         return obs_raw, obs_dp
 
     # ----------------------------
     # PAEP forward
     # ----------------------------
     @torch.no_grad()
-    def _run_paep(
-        self,
-        ext_img: torch.Tensor,       # (B,3,H,W) float in [0,1]
-        wrist_img: torch.Tensor,     # (B,3,H,W)
-        wrench_hist: torch.Tensor,   # (B,L,6)
-        pose: torch.Tensor,          # (B,9)
-    ):
-        # PAEP internal normalization for wrench/pose
+    def _run_paep(self, ext_img, wrist_img, wrench_hist, pose):
+        # 1) resize to paep_img_size
+        if ext_img.shape[-1] != self.paep_img_size or ext_img.shape[-2] != self.paep_img_size:
+            ext_img = F.interpolate(ext_img, size=(self.paep_img_size, self.paep_img_size),
+                                    mode="bilinear", align_corners=False)
+        if wrist_img.shape[-1] != self.paep_img_size or wrist_img.shape[-2] != self.paep_img_size:
+            wrist_img = F.interpolate(wrist_img, size=(self.paep_img_size, self.paep_img_size),
+                                    mode="bilinear", align_corners=False)
+
+        # 2) normalize wrench/pose using ckpt stats
         w = (wrench_hist - self._paep_wm[None, None, :]) / (self._paep_ws[None, None, :] + 1e-6)
         p = (pose - self._paep_pm[None, :]) / (self._paep_ps[None, :] + 1e-6)
 
-        out = self.paep(ext_img, wrist_img, w, p)
-        p_phase = out["p_phase"]       # (B,3)
-        p_contact = out["p_contact"]   # (B,1)
-        return p_phase, p_contact
+        # 3) pass img_size only if supported
+        import inspect
+        sig = inspect.signature(self.paep.forward)
+        if "img_size" in sig.parameters:
+            out = self.paep(ext_img, wrist_img, w, p, img_size=self.paep_img_size)
+        else:
+            out = self.paep(ext_img, wrist_img, w, p)
+            
+        import torch.distributed as dist
+        def _rank0():
+            return (not dist.is_available()) or (not dist.is_initialized()) or dist.get_rank() == 0
+
+        if _rank0() and (not hasattr(self, "_paep_dbg_once")):
+            self._paep_dbg_once = True
+            for kk, vv in out.items():
+                if torch.is_tensor(vv):
+                    print(
+                        f"[DBG][paep_out] {kk} "
+                        f"shape={tuple(vv.shape)} "
+                        f"min={vv.min().item():.4f} max={vv.max().item():.4f} mean={vv.mean().item():.4f}"
+                    )
+        # ================================================
+
+        return out["p_phase"], out["p_contact"]
+
 
     def _compute_g_contact(self, p_contact: torch.Tensor) -> torch.Tensor:
         g = p_contact.squeeze(-1)  # (B,)
@@ -360,6 +390,22 @@ class PAEPGatedDiffusionUnetImageForcePolicy(BaseImagePolicy):
         # ---- vision encoder inputs (DP-normalized / float) ----
         enc_nobs = {k: obs_dp[k][:, :To] for k in self.rgb_keys if k in obs_dp}
         flat_rgb = dict_apply(enc_nobs, lambda x: x.reshape(-1, *x.shape[2:]))  # (B*To,...)
+
+
+        import torch.distributed as dist
+
+        def _rank0():
+            return (not dist.is_available()) or (not dist.is_initialized()) or dist.get_rank() == 0
+
+        # 在 v_feat = self.obs_encoder(flat_rgb) 之前插入：
+        if _rank0():
+            # 取一个 key 看范围即可
+            k0 = self.rgb_keys[0] if len(self.rgb_keys) > 0 else None
+            if k0 is not None and k0 in enc_nobs:
+                x = enc_nobs[k0]  # (B,To,3,H,W)
+                x0 = x[:, 0]      # (B,3,H,W)
+                print(f"[DBG][obs_encoder_in] key={k0} min={x0.min().item():.4f} max={x0.max().item():.4f} mean={x0.mean().item():.4f} std={x0.std().item():.4f}")
+
         v_feat = self.obs_encoder(flat_rgb)  # (B*To,Dv)
 
         # flatten PAEP inputs
@@ -372,6 +418,12 @@ class PAEPGatedDiffusionUnetImageForcePolicy(BaseImagePolicy):
         p_phase, p_contact = self._run_paep(flat_ext, flat_wrist, flat_wrench_raw, flat_pose)
         g_contact = self._compute_g_contact(p_contact)
 
+        if _rank0():
+            pc = p_contact
+            print(f"[DBG][paep] p_contact min={pc.min().item():.4f} max={pc.max().item():.4f} mean={pc.mean().item():.4f}")
+            pp = p_phase
+            print(f"[DBG][paep] p_phase mean={pp.mean().item():.4f} (should be ~1/3 if uniform)")
+
         # wrench_hist for TCN (normalize by wrench_key if exists)
         flat_wrench_tcn = flat_wrench_raw
         if self._has_norm_key(self.wrench_key):
@@ -380,6 +432,15 @@ class PAEPGatedDiffusionUnetImageForcePolicy(BaseImagePolicy):
                 flat_wrench_tcn = self.normalizer[self.wrench_key].normalize(flat_wrench_raw)
             except Exception:
                 flat_wrench_tcn = flat_wrench_raw
+
+        if _rank0():
+            raw_std = flat_wrench_raw.std().item()
+            raw_mean = flat_wrench_raw.mean().item()
+            tcn_std = flat_wrench_tcn.std().item()
+            tcn_mean = flat_wrench_tcn.mean().item()
+            has = self._has_norm_key(self.wrench_key)
+            print(f"[DBG][wrench_hist] has_norm({self.wrench_key})={has} raw(mean,std)=({raw_mean:.4f},{raw_std:.4f})  normed(mean,std)=({tcn_mean:.4f},{tcn_std:.4f})")
+
 
         force_tokens, force_global = self.force_tcn(flat_wrench_tcn)  # (B*To,L,Dv), (B*To,Dv)
 
@@ -545,6 +606,14 @@ class PAEPGatedDiffusionUnetImageForcePolicy(BaseImagePolicy):
         obs_raw, obs_dp = self._split_raw_and_dp_obs(obs)
 
         nactions = self.normalizer["action"].normalize(batch["action"])
+        
+        def _rank0():
+            return (not dist.is_available()) or (not dist.is_initialized()) or dist.get_rank() == 0
+        if _rank0():
+            a_raw = batch["action"]
+            a_n = nactions
+            print(f"[DBG][action_norm] raw(mean,std)=({a_raw.mean().item():.4f},{a_raw.std().item():.4f})  normed(mean,std)=({a_n.mean().item():.4f},{a_n.std().item():.4f})")
+
         batch_size = nactions.shape[0]
         horizon = nactions.shape[1]
 

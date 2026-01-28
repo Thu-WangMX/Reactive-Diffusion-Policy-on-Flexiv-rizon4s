@@ -185,3 +185,5 @@ logs/
 
 FoAR/
 outputs.tar.gz
+PAEP/*.pt
+dp_train_logs/

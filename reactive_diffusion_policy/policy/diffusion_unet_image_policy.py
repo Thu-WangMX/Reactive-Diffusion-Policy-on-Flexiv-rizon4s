@@ -146,6 +146,29 @@ class DiffusionUnetImagePolicy(BaseImagePolicy):
             # condition through global feature
             this_nobs = dict_apply(nobs, lambda x: x[:,:To,...].reshape(-1,*x.shape[2:]))
             nobs_features = self.obs_encoder(this_nobs)
+
+
+            # ==== DEBUG: check rgb range before obs_encoder ====
+            import torch.distributed as dist
+
+            def _rank0():
+                return (not dist.is_available()) or (not dist.is_initialized()) or dist.get_rank() == 0
+
+            if _rank0():
+                # this_nobs is a dict: key -> (B,To,3,H,W)
+                for k, v in this_nobs.items():
+                    if v.dim() >= 5:  # rgb
+                        x = v[:, 0]   # (B,3,H,W), take first obs step
+                        print(
+                            f"[DP-DBG][encoder_in] key={k} "
+                            f"min={x.min().item():.4f} "
+                            f"max={x.max().item():.4f} "
+                            f"mean={x.mean().item():.4f} "
+                            f"std={x.std().item():.4f}"
+                        )
+                        break
+            # ================================================
+
             # reshape back to B, Do
             global_cond = nobs_features.reshape(B, -1)
             # empty data for action

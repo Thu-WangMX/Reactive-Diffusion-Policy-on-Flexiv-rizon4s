@@ -8,7 +8,7 @@ name: wmx_paep_real_wiping_board_image_dp_absolute_24fps
 image_shape: [3, 240, 320]
 
 # 按你的实际数据路径改
-dataset_path: /home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/dataset/wiping_board_stream_downsample1_zarr
+dataset_path: /home/ubuntu/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/dataset/wiping_board_stream_downsample1_zarr
 
 shape_meta: &shape_meta
   # acceptable types: rgb, low_dim
