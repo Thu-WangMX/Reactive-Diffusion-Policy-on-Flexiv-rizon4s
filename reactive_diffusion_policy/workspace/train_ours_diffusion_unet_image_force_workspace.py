@@ -134,8 +134,18 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
 
         # IMPORTANT: if your custom policy may have unused params on some ranks,
         # let accelerate build DDP with find_unused_parameters=True
+        # accelerator prepare
         ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
         accelerator = Accelerator(log_with="wandb", kwargs_handlers=[ddp_kwargs])
+
+        # only in the main process initialize wandb
+        if accelerator.is_main_process:
+            accelerator.init_trackers(
+                project_name=cfg.logging.project,
+                config=OmegaConf.to_container(cfg, resolve=True),
+                init_kwargs={"wandb": {"name": cfg.logging.run_name}},
+            )
+
         
         os.makedirs(self.output_dir, exist_ok=True)
 
@@ -148,7 +158,16 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
         # 等所有进程同步后再创建 logger（避免多进程竞争）
         accelerator.wait_for_everyone()
 
-        json_logger = JsonLogger(log_path)
+        import json
+
+        def jsonl_log(obj: dict):
+            # 只让主进程写文件
+            if not accelerator.is_main_process:
+                return
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+                f.flush()
+
 
 
         # save batch for sampling
@@ -168,7 +187,8 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
 
         # load normalizer on all processes
         accelerator.wait_for_everyone()
-        normalizer = pickle.load(open(normalizer_path, "rb"))
+        with open(normalizer_path, "rb") as f:
+            normalizer = pickle.load(f)
 
         # configure validation dataset
         val_dataset = dataset.get_validation_dataset()
@@ -301,7 +321,9 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
                             # normal steps: log now
                             accelerator.log(step_log, step=self.global_step)
                             
-                            json_logger.log(step_log)
+                            if accelerator.is_main_process:
+                                jsonl_log(step_log)
+
                             self.global_step += 1
                         else:
                             # last step: defer logging (will be combined with val/sample at SAME global_step)
@@ -372,7 +394,7 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
                 final_log["global_step"] = self.global_step
                 if accelerator.is_main_process:
                     accelerator.log(final_log, step=self.global_step)
-                    json_logger.log(final_log)
+                    jsonl_log(final_log)
 
                 self.global_step += 1
                 self.epoch += 1

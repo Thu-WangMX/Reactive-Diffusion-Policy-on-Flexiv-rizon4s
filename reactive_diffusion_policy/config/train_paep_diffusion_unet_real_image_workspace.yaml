@@ -244,6 +244,7 @@ training:
 logging:
   project: paep_gated_diffusion_policy
   resume: False
+  run_name: "ours_policy_v4_at_0128"
   mode: online
   name: ${now:%Y.%m.%d-%H.%M.%S}_${name}_${task_name}
   tags: ["${name}", "${task_name}", "${exp_name}"]
