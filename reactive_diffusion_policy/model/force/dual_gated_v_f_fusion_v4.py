@@ -48,7 +48,7 @@ class DualGatedVisionForceFusion(nn.Module):
         # Optional safety: injected_norm <= inj_ratio_cap * vision_norm
         inj_ratio_cap: float | None = None,
         # Debug (no file I/O)
-        enable_debug: bool = False,
+        enable_debug: bool = True,
     ):
         super().__init__()
         self.d_model = int(d_model)

@@ -24,6 +24,8 @@ from reactive_diffusion_policy.model.force.dual_gated_v_f_fusion_v4 import DualG
 # ----------------------------
 # Robust PAEP import (same spirit as v3)
 # ----------------------------
+
+
 def _load_paep_future_net():
     repo_root = Path(__file__).resolve().parents[2]
     paep_dir = repo_root / "PAEP"
@@ -269,9 +271,27 @@ class PAEPGatedDiffusionUnetImageForcePolicy(BaseImagePolicy):
         self._last_debug = None
         self._extra_step_log = None
 
+    def _to_float(self, x):
+        try:
+            if torch.is_tensor(x):
+                return float(x.detach().item())
+            return float(x)
+        except Exception:
+            return None
+
+    def _push_extra_log(self, d: dict, prefix: str = ""):
+        if not hasattr(self, "_extra_step_log") or self._extra_step_log is None:
+            self._extra_step_log = {}
+        for k, v in (d or {}).items():
+            fv = self._to_float(v)
+            if fv is not None:
+                self._extra_step_log[prefix + k] = fv
+
+
     # ----------------------------
     # normalizer helper (DP-compatible, plus dict support like v3)
     # ----------------------------
+    
     def _has_norm_key(self, k: str) -> bool:
         return isinstance(k, str) and hasattr(self.normalizer, "params_dict") and (k in self.normalizer.params_dict)
 
@@ -350,18 +370,18 @@ class PAEPGatedDiffusionUnetImageForcePolicy(BaseImagePolicy):
             out = self.paep(ext_img, wrist_img, w, p)
             
         import torch.distributed as dist
-        def _rank0():
-            return (not dist.is_available()) or (not dist.is_initialized()) or dist.get_rank() == 0
+        # def _rank0():
+        #     return (not dist.is_available()) or (not dist.is_initialized()) or dist.get_rank() == 0
 
-        if _rank0() and (not hasattr(self, "_paep_dbg_once")):
-            self._paep_dbg_once = True
-            for kk, vv in out.items():
-                if torch.is_tensor(vv):
-                    print(
-                        f"[DBG][paep_out] {kk} "
-                        f"shape={tuple(vv.shape)} "
-                        f"min={vv.min().item():.4f} max={vv.max().item():.4f} mean={vv.mean().item():.4f}"
-                    )
+        # if _rank0() and (not hasattr(self, "_paep_dbg_once")):
+        #     self._paep_dbg_once = True
+        #     for kk, vv in out.items():
+        #         if torch.is_tensor(vv):
+        #             print(
+        #                 f"[DBG][paep_out] {kk} "
+        #                 f"shape={tuple(vv.shape)} "
+        #                 f"min={vv.min().item():.4f} max={vv.max().item():.4f} mean={vv.mean().item():.4f}"
+        #             )
         # ================================================
 
         return out["p_phase"], out["p_contact"]
@@ -394,17 +414,17 @@ class PAEPGatedDiffusionUnetImageForcePolicy(BaseImagePolicy):
 
         import torch.distributed as dist
 
-        def _rank0():
-            return (not dist.is_available()) or (not dist.is_initialized()) or dist.get_rank() == 0
+        # def _rank0():
+        #     return (not dist.is_available()) or (not dist.is_initialized()) or dist.get_rank() == 0
 
-        # 在 v_feat = self.obs_encoder(flat_rgb) 之前插入：
-        if _rank0():
-            # 取一个 key 看范围即可
-            k0 = self.rgb_keys[0] if len(self.rgb_keys) > 0 else None
-            if k0 is not None and k0 in enc_nobs:
-                x = enc_nobs[k0]  # (B,To,3,H,W)
-                x0 = x[:, 0]      # (B,3,H,W)
-                print(f"[DBG][obs_encoder_in] key={k0} min={x0.min().item():.4f} max={x0.max().item():.4f} mean={x0.mean().item():.4f} std={x0.std().item():.4f}")
+        # # 在 v_feat = self.obs_encoder(flat_rgb) 之前插入：
+        # if _rank0():
+        #     # 取一个 key 看范围即可
+        #     k0 = self.rgb_keys[0] if len(self.rgb_keys) > 0 else None
+        #     if k0 is not None and k0 in enc_nobs:
+        #         x = enc_nobs[k0]  # (B,To,3,H,W)
+        #         x0 = x[:, 0]      # (B,3,H,W)
+        #         print(f"[DBG][obs_encoder_in] key={k0} min={x0.min().item():.4f} max={x0.max().item():.4f} mean={x0.mean().item():.4f} std={x0.std().item():.4f}")
 
         v_feat = self.obs_encoder(flat_rgb)  # (B*To,Dv)
 
@@ -418,11 +438,11 @@ class PAEPGatedDiffusionUnetImageForcePolicy(BaseImagePolicy):
         p_phase, p_contact = self._run_paep(flat_ext, flat_wrist, flat_wrench_raw, flat_pose)
         g_contact = self._compute_g_contact(p_contact)
 
-        if _rank0():
-            pc = p_contact
-            print(f"[DBG][paep] p_contact min={pc.min().item():.4f} max={pc.max().item():.4f} mean={pc.mean().item():.4f}")
-            pp = p_phase
-            print(f"[DBG][paep] p_phase mean={pp.mean().item():.4f} (should be ~1/3 if uniform)")
+        # if _rank0():
+        #     pc = p_contact
+        #     print(f"[DBG][paep] p_contact min={pc.min().item():.4f} max={pc.max().item():.4f} mean={pc.mean().item():.4f}")
+        #     pp = p_phase
+        #     print(f"[DBG][paep] p_phase mean={pp.mean().item():.4f} (should be ~1/3 if uniform)")
 
         # wrench_hist for TCN (normalize by wrench_key if exists)
         flat_wrench_tcn = flat_wrench_raw
@@ -433,13 +453,13 @@ class PAEPGatedDiffusionUnetImageForcePolicy(BaseImagePolicy):
             except Exception:
                 flat_wrench_tcn = flat_wrench_raw
 
-        if _rank0():
-            raw_std = flat_wrench_raw.std().item()
-            raw_mean = flat_wrench_raw.mean().item()
-            tcn_std = flat_wrench_tcn.std().item()
-            tcn_mean = flat_wrench_tcn.mean().item()
-            has = self._has_norm_key(self.wrench_key)
-            print(f"[DBG][wrench_hist] has_norm({self.wrench_key})={has} raw(mean,std)=({raw_mean:.4f},{raw_std:.4f})  normed(mean,std)=({tcn_mean:.4f},{tcn_std:.4f})")
+        # if _rank0():
+        #     raw_std = flat_wrench_raw.std().item()
+        #     raw_mean = flat_wrench_raw.mean().item()
+        #     tcn_std = flat_wrench_tcn.std().item()
+        #     tcn_mean = flat_wrench_tcn.mean().item()
+        #     has = self._has_norm_key(self.wrench_key)
+        #     print(f"[DBG][wrench_hist] has_norm({self.wrench_key})={has} raw(mean,std)=({raw_mean:.4f},{raw_std:.4f})  normed(mean,std)=({tcn_mean:.4f},{tcn_std:.4f})")
 
 
         force_tokens, force_global = self.force_tcn(flat_wrench_tcn)  # (B*To,L,Dv), (B*To,Dv)
@@ -453,6 +473,42 @@ class PAEPGatedDiffusionUnetImageForcePolicy(BaseImagePolicy):
             p_phase=p_phase,
             p_contact=p_contact,
         )  # (B*To,Dv)
+
+        # ---- (A) PAEP stats ----
+        with torch.no_grad():
+            # p_contact: (B*To,1), p_phase:(B*To,3), g_contact:(B*To,)
+            pc = p_contact
+            pp = p_phase
+            # entropy of phase prob
+            phase_ent = (-(pp.clamp_min(1e-9).log() * pp).sum(dim=-1)).mean()
+
+            self._push_extra_log({
+                "paep/p_contact_mean": pc.mean(),
+                "paep/p_contact_min": pc.min(),
+                "paep/p_contact_max": pc.max(),
+                "paep/phase_entropy": phase_ent,
+                "paep/g_contact_mean": g_contact.mean(),
+                "paep/g_contact_min": g_contact.min(),
+                "paep/g_contact_max": g_contact.max(),
+            })
+
+        # ---- (B) attention stats (always available) ----
+        attn_dbg = getattr(self.fusion.cross_attn, "_last_attn_debug", None)
+        if isinstance(attn_dbg, dict):
+            self._push_extra_log(attn_dbg, prefix="attn/")
+
+        # ---- (C) fusion stats (need enable_debug=True) ----
+        fus_dbg = getattr(self.fusion, "_last_fusion_debug", None)
+        if isinstance(fus_dbg, dict):
+            self._push_extra_log(fus_dbg, prefix="fusion/")
+
+        # ---- (D) optional: force token norms ----
+        with torch.no_grad():
+            self._push_extra_log({
+                "force/tokens_norm_mean": force_tokens.norm(dim=-1).mean(),
+                "force/global_norm_mean": force_global.norm(dim=-1).mean(),
+            })
+
 
         # proprio (DP-style direct concat)
         if (self.pose_key not in obs_dp) or (self.gripper_key not in obs_dp):
@@ -607,12 +663,12 @@ class PAEPGatedDiffusionUnetImageForcePolicy(BaseImagePolicy):
 
         nactions = self.normalizer["action"].normalize(batch["action"])
         
-        def _rank0():
-            return (not dist.is_available()) or (not dist.is_initialized()) or dist.get_rank() == 0
-        if _rank0():
-            a_raw = batch["action"]
-            a_n = nactions
-            print(f"[DBG][action_norm] raw(mean,std)=({a_raw.mean().item():.4f},{a_raw.std().item():.4f})  normed(mean,std)=({a_n.mean().item():.4f},{a_n.std().item():.4f})")
+        # def _rank0():
+        #     return (not dist.is_available()) or (not dist.is_initialized()) or dist.get_rank() == 0
+        # if _rank0():
+        #     a_raw = batch["action"]
+        #     a_n = nactions
+        #     print(f"[DBG][action_norm] raw(mean,std)=({a_raw.mean().item():.4f},{a_raw.std().item():.4f})  normed(mean,std)=({a_n.mean().item():.4f},{a_n.std().item():.4f})")
 
         batch_size = nactions.shape[0]
         horizon = nactions.shape[1]

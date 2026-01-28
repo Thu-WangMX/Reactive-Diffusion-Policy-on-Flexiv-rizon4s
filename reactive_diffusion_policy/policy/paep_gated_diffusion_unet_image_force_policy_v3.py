@@ -207,7 +207,7 @@ class PAEPGatedDiffusionUnetImageForcePolicy(BaseImagePolicy):
             use_contact_in_head_gate=bool(head_gate_use_contact),
             use_ln=True,
             ln_out=False, 
-            enable_debug=False   # ✅建议先关
+            enable_debug=True   # ✅建议先关
         )
 
 
