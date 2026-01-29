@@ -168,21 +168,87 @@ class DualGatedVisionForceFusion(nn.Module):
         v_fused = v_q + scale * d_hat                                         # (B,1,D)
         v_fused = self.ln_out(v_fused)
 
+        # dual_gated_v_f_fusion_v4.py
+        # 在 forward() 末尾：if self.enable_debug: with torch.no_grad(): 里替换为：
+
         if self.enable_debug:
             with torch.no_grad():
-                vn = v_q.norm(dim=-1).squeeze(1)                              # (B,)
-                inj = (scale * d_hat).norm(dim=-1).squeeze(1)                 # (B,)
-                cos_vd = (v_q * delta).sum(dim=-1).squeeze(1) / (
-                    v_q.norm(dim=-1).squeeze(1) * delta.norm(dim=-1).squeeze(1) + eps
-                )
+                # ---- norms ----
+                vn = v_q.norm(dim=-1).squeeze(1)                            # (B,)
+                dn = delta.norm(dim=-1).squeeze(1)                          # (B,)
+                inj_vec = (scale * d_hat).squeeze(1)                        # (B,D)
+                inj = inj_vec.norm(dim=-1)                                  # (B,)
+
+                # ---- scales ----
+                raw_scale = (alpha * g_contact).view(B)                     # (B,) 未cap
+                sc = scale.view(B)                                          # (B,) cap后真实scale
+
+                # ---- ratios ----
+                eps_ = eps
+                delta_over_v = dn / (vn + eps_)
+                inj_over_v   = inj / (vn + eps_)
+
+                # ---- cos(v,delta) ----
+                denom = (v_q.norm(dim=-1).squeeze(1).clamp_min(eps_) *
+                        delta.norm(dim=-1).squeeze(1).clamp_min(eps_))
+                cos_vd = (v_q * delta).sum(dim=-1).squeeze(1) / (denom + eps_)
+
+                # ---- phase/contact stats ----
+                # p_phase: (B,3), p_contact: (B,1)
+                p0 = p_phase[:, 0]
+                p1 = p_phase[:, 1]
+                p2 = p_phase[:, 2]
+                pc = p_contact.view(B)
+
+                # ---- effective/realized ratio（解释：cap导致的缩放衰减比例）----
+                # 1.0 = 没触发cap；<1 = 触发cap
+                eff_ratio = sc / (raw_scale.abs() + eps_)
+
                 self._last_fusion_debug = {
+                    # 你 runner 会读的这些 key（全部补齐）
+                    "v_norm_mean": float(vn.mean().cpu().item()),
+                    "v_norm_max":  float(vn.max().cpu().item()),
+
+                    "delta_norm_mean": float(dn.mean().cpu().item()),
+                    "delta_norm_max":  float(dn.max().cpu().item()),
+
+                    "inj_norm_mean": float(inj.mean().cpu().item()),
+                    "inj_norm_max":  float(inj.max().cpu().item()),
+
+                    "inj_raw_mean": float(inj_vec.mean().cpu().item()),
+
+                    "effective_ratio_mean": float(eff_ratio.mean().cpu().item()),
+                    "realized_ratio_mean":  float(eff_ratio.mean().cpu().item()),
+
+                    "g_contact_mean": float(g_contact.mean().cpu().item()),
+                    # 我这里把 amp_mean 定义成“未cap的 raw_scale 均值”，更直观看强度
+                    "amp_mean": float(raw_scale.mean().cpu().item()),
+                    "p_contact_mean": float(pc.mean().cpu().item()),
+
+                    "cos_v_delta_mean": float(cos_vd.mean().cpu().item()),
+                    "cos_v_delta_min":  float(cos_vd.min().cpu().item()),
+                    "cos_v_delta_max":  float(cos_vd.max().cpu().item()),
+
+                    "scale_mean": float(sc.mean().cpu().item()),
+                    "scale_min":  float(sc.min().cpu().item()),
+                    "scale_max":  float(sc.max().cpu().item()),
+
+                    "p_phase0_mean": float(p0.mean().cpu().item()),
+                    "p_phase1_mean": float(p1.mean().cpu().item()),
+                    "p_phase2_mean": float(p2.mean().cpu().item()),
+
+                    # 额外留着（你 runner 没读，但你可能想看）
                     "alpha": float(alpha.detach().cpu().item()),
-                    "g_contact_mean": float(g_contact.mean().detach().cpu().item()),
-                    "v_norm_mean": float(vn.mean().detach().cpu().item()),
-                    "inj_norm_mean": float(inj.mean().detach().cpu().item()),
-                    "inj_over_v_mean": float((inj / (vn + eps)).mean().detach().cpu().item()),
-                    "cos_vd_mean": float(cos_vd.mean().detach().cpu().item()),
                     "g_head_mean": float(g_head.mean().detach().cpu().item()),
+                    "delta_over_v_mean": float(delta_over_v.mean().cpu().item()),
+                    "inj_over_v_mean": float(inj_over_v.mean().cpu().item()),
+
+                    # 在 self._last_fusion_debug = { ... } 里面追加这些 alias（建议放最后）
+                    "cos_vd_mean": float(cos_vd.mean().cpu().item()),
+                    "cos_vd_min":  float(cos_vd.min().cpu().item()),
+                    "cos_vd_max":  float(cos_vd.max().cpu().item()),
+
                 }
+
 
         return v_fused.squeeze(1)

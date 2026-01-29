@@ -2,8 +2,8 @@ import dill
 import pickle
 from pathlib import Path
 
-pkl_path = Path("/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/data/outputs/"
-                "wmx_paep_real_wiping_board_image_dp_absolute_24fps/0127221155/normalizer.pkl")
+pkl_path = Path("/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/ckpt/"
+                "OURS_v4——0128/normalizer.pkl")
 
 # 尝试用 dill 读取（你项目里 ckpt/load 常用 dill）
 with open(pkl_path, "rb") as f:

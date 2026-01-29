@@ -112,6 +112,7 @@ class PAEPGatedDiffusionUnetImageForcePolicy(BaseImagePolicy):
         head_gate_use_contact: bool = False,
         # fusion (orthogonal residual)
         fusion_alpha: float = 0.05,
+        #fusion_alpha: float = 0.0,
         fusion_learnable_alpha: bool = False,
         fusion_alpha_max: float = 0.2,
         fusion_inj_ratio_cap: float | None = None,
@@ -286,6 +287,18 @@ class PAEPGatedDiffusionUnetImageForcePolicy(BaseImagePolicy):
             fv = self._to_float(v)
             if fv is not None:
                 self._extra_step_log[prefix + k] = fv
+    
+    def _pop_extra_log(self) -> dict:
+        """
+        Return and clear extra step log (scalar floats).
+        Safe for eval: no tensors, no big arrays.
+        """
+        d = getattr(self, "_extra_step_log", None)
+        if not isinstance(d, dict):
+            return {}
+        out = dict(d)
+        self._extra_step_log = {}  # clear
+        return out
 
 
     # ----------------------------
@@ -643,10 +656,71 @@ class PAEPGatedDiffusionUnetImageForcePolicy(BaseImagePolicy):
         end = start + self.n_action_steps
         action = action_pred[:, start:end]
 
-        return {
+        # ---- expose PAEP + compact debug stats for real-runner ----
+        out = {
             "action": action,
             "action_pred": action_pred,
         }
+
+        # 1) PAEP probabilities (use the last obs step t = To-1)
+        dbg = getattr(self, "_last_debug", None)
+        if isinstance(dbg, dict):
+            try:
+                To = int(self.n_obs_steps)
+                B = int(B)
+
+                # shapes: p_phase (B*To,3), p_contact (B*To,1), g_contact (B*To,)
+                p_phase = dbg["p_phase"].reshape(B, To, 3)[:, -1]          # (B,3)
+                p_contact = dbg["p_contact"].reshape(B, To, 1)[:, -1]      # (B,1)
+                g_contact = dbg["g_contact"].reshape(B, To)[:, -1]         # (B,)
+
+                phase_conf, phase_id = torch.max(p_phase, dim=-1)          # (B,), (B,)
+
+                out.update({
+                    "paep_p_phase": p_phase,                               # (B,3)
+                    "paep_p_contact": p_contact,                           # (B,1)
+                    "paep_g_contact": g_contact.unsqueeze(-1),             # (B,1)
+                    "paep_phase_id": phase_id.unsqueeze(-1).to(torch.int64),  # (B,1)
+                    "paep_phase_conf": phase_conf.unsqueeze(-1),           # (B,1)
+                })
+            except Exception:
+                pass
+
+        # 2) compact scalar debug (already computed in _encode_fused_obs)
+        #    NOTE: only export a small, high-signal subset to avoid overhead.
+        extra = self._pop_extra_log()
+        def _put_scalar(name, key):
+            v = extra.get(key, None)
+            if v is None:
+                return
+            try:
+                out[name] = torch.tensor(float(v), device=self.device, dtype=self.dtype).view(1, 1).repeat(B, 1)
+            except Exception:
+                pass
+
+        # --- PAEP scalars ---
+        _put_scalar("dbg_paep_phase_entropy", "paep/phase_entropy")
+        _put_scalar("dbg_paep_p_contact_mean", "paep/p_contact_mean")
+        _put_scalar("dbg_paep_g_contact_mean", "paep/g_contact_mean")
+
+        # --- Fusion scalars (prefix in _encode_fused_obs was fusion/) ---
+        _put_scalar("dbg_fusion_inj_over_v", "fusion/inj_over_v_mean")
+        _put_scalar("dbg_fusion_scale_mean", "fusion/scale_mean")
+        _put_scalar("dbg_fusion_cos_vd", "fusion/cos_vd_mean")   # needs alias key added in fusion file (see patch 1)
+        _put_scalar("dbg_fusion_g_head_mean", "fusion/g_head_mean")
+        _put_scalar("dbg_fusion_v_norm_mean", "fusion/v_norm_mean")
+
+        # --- Attention scalars ---
+        _put_scalar("dbg_attn_entropy", "attn/attn_entropy_mean")
+        _put_scalar("dbg_attn_max", "attn/attn_max_mean")
+        _put_scalar("dbg_attn_g_head_mean", "attn/g_head_mean")
+
+        # --- Force encoder norms ---
+        _put_scalar("dbg_force_tokens_norm", "force/tokens_norm_mean")
+        _put_scalar("dbg_force_global_norm", "force/global_norm_mean")
+
+        return out
+
 
     def compute_loss(self, batch: dict) -> torch.Tensor:
 

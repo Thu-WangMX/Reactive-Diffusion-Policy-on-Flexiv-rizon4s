@@ -309,6 +309,7 @@ class WrenchHistWrapper(torch.nn.Module):
 
     def predict_action(self, obs_dict):
         # already has wrench_hist
+        obs_dict = self._cast_obs_fp32(obs_dict)
         if self.wrench_hist_key in obs_dict:
             return self.policy.predict_action(obs_dict)
 
@@ -392,10 +393,34 @@ def main(cfg):
 
     if use_ema and hasattr(workspace, "ema_model") and (workspace.ema_model is not None):
         policy = workspace.ema_model
-        print("[Eval] Using EMA model.")
+
+        # ✅ 关键：确保 EMA policy 也带上 normalizer
+        if hasattr(workspace, "model") and hasattr(workspace.model, "normalizer"):
+            try:
+                policy.set_normalizer(workspace.model.normalizer)
+            except Exception:
+                policy.normalizer = workspace.model.normalizer
+
+        print("[Eval] Using EMA model (normalizer synced).")
+
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     policy.eval().to(device)
+
+
+
+    # ✅ 启动阶段就判定：TCN 是否会吃到标准化 wrench
+    has_norm = policy._has_norm_key("left_robot_tcp_wrench")
+    norm_keys = list(getattr(policy.normalizer, "params_dict", {}).keys()) if hasattr(policy, "normalizer") else []
+    print("has_norm_wrench =", has_norm)
+    print("norm_keys =", norm_keys)
+
+    assert has_norm, (
+        "Normalizer missing key 'left_robot_tcp_wrench' -> "
+        "policy_v4 TCN will use RAW wrench (distribution mismatch). "
+        "Fix: ensure ckpt payload loads normalizer into policy, or sync normalizer to EMA model."
+    )
+
 
     # 3) load PAEP into policy
     _load_paep_into_policy(policy, paep_ckpt_path)

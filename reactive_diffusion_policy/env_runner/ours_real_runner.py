@@ -194,7 +194,18 @@ class RealRunner:
 
         self._dbg_step = 0
 
-        def _dbg(self, tag, **kw): json.dump({...}, self._dbg_f); self._dbg_f.write("\n")
+        def _dbg(tag, **kw):
+            rec = {
+                "t": time.time(),
+                "step": int(getattr(self, "_dbg_step", 0)),
+                "tag": str(tag),
+                **kw,
+            }
+            json.dump(rec, self._dbg_f)
+            self._dbg_f.write("\n")
+
+        self._dbg = _dbg
+
 
         # --- rclpy/env ---
         rclpy.init(args=None)
@@ -293,6 +304,7 @@ class RealRunner:
 
         # --- dense wrench buffer (24Hz) ---
         self.enable_dense_wrench_hist = bool(enable_dense_wrench_hist)
+        self.debug_zero_wrench_hist = False
         self.force_hist = int(force_hist)
         self._wrench_dense_buf = deque(maxlen=self.force_hist + 64)  # store (6,)
         self._wrench_stop = threading.Event()
@@ -725,14 +737,14 @@ class RealRunner:
 
                         np_obs_dict = dict(obs)
 
-                        if step_count == 0:
-                            for k in ["external_img", "left_wrist_img"]:
-                                if k in np_obs_dict:
-                                    x = np.asarray(np_obs_dict[k])
-                                    logger.info(
-                                        f"[RAW_IMG] {k}: dtype={x.dtype} shape={x.shape} "
-                                        f"min={x.min()} max={x.max()} mean={x.mean():.4f}"
-                                    )
+                        # if step_count == 0:
+                        #     for k in ["external_img", "left_wrist_img"]:
+                        #         if k in np_obs_dict:
+                        #             x = np.asarray(np_obs_dict[k])
+                        #             logger.info(
+                        #                 f"[RAW_IMG] {k}: dtype={x.dtype} shape={x.shape} "
+                        #                 f"min={x.min()} max={x.max()} mean={x.mean():.4f}"
+                        #             )
 
                         fz = _extract_fz_from_obs(np_obs_dict)
                         if fz is not None:
@@ -742,14 +754,14 @@ class RealRunner:
 
                         np_obs_dict = get_real_obs_dict(env_obs=np_obs_dict, shape_meta=self.shape_meta)
 
-                        if step_count == 0:
-                            for k in ["external_img", "left_wrist_img"]:
-                                if k in np_obs_dict:
-                                    x = np.asarray(np_obs_dict[k])
-                                    logger.info(
-                                        f"[POLICY_IMG] {k}: dtype={x.dtype} shape={x.shape} "
-                                        f"min={x.min():.4f} max={x.max():.4f} mean={x.mean():.4f}"
-                                    )
+                        # if step_count == 0:
+                        #     for k in ["external_img", "left_wrist_img"]:
+                        #         if k in np_obs_dict:
+                        #             x = np.asarray(np_obs_dict[k])
+                        #             logger.info(
+                        #                 f"[POLICY_IMG] {k}: dtype={x.dtype} shape={x.shape} "
+                        #                 f"min={x.min():.4f} max={x.max():.4f} mean={x.mean():.4f}"
+                        #             )
 
                         np_obs_dict, np_absolute_obs_dict = self.pre_process_obs(np_obs_dict)
 
@@ -761,7 +773,12 @@ class RealRunner:
                                 To = int(obs_dict["left_robot_tcp_wrench"].shape[1]) if "left_robot_tcp_wrench" in obs_dict else int(self.n_obs_steps)
                                 wh = self._build_wrench_hist_from_dense(To=To)
                                 if wh is not None:
-                                    obs_dict["wrench_hist"] = torch.from_numpy(wh).unsqueeze(0).to(device=device)
+                                    wh_t = torch.from_numpy(wh).unsqueeze(0).to(device=device)
+                                    if getattr(self, "debug_zero_wrench_hist", False):
+                                        obs_dict["wrench_hist"] = torch.zeros_like(wh_t)
+                                    else:
+                                        obs_dict["wrench_hist"] = wh_t
+
                             except Exception as e:
                                 logger.warning(f"[WRENCH_HIST] build/inject failed: {e}")
 
@@ -776,6 +793,7 @@ class RealRunner:
                                 action_dict = policy.predict_action(obs_dict)
 
                         np_action_dict = dict_apply(action_dict, lambda x: x.detach().to("cpu").numpy())
+
                         # ---- DBG: how much force residual is injected into vision ----
                         if (infer_step % 1) == 0:
                             try:
@@ -815,50 +833,64 @@ class RealRunner:
                                                 return float(default)
 
                                         # ---- pull numbers from fusion debug dict (your fusion stores these keys) ----
-                                        v_norm_mean = _to_float(dd.get("v_norm_mean"))
-                                        v_norm_max  = _to_float(dd.get("v_norm_max"))
-                                        d_norm_mean = _to_float(dd.get("delta_norm_mean"))
-                                        d_norm_max  = _to_float(dd.get("delta_norm_max"))
-                                        inj_norm_mean = _to_float(dd.get("inj_norm_mean"))
-                                        inj_norm_max  = _to_float(dd.get("inj_norm_max"))
+                                        import math
 
-                                        inj_raw_mean = _to_float(dd.get("inj_raw_mean"))
-                                        eff_ratio_mean = _to_float(dd.get("effective_ratio_mean"))
-                                        realized_ratio_mean = _to_float(dd.get("realized_ratio_mean"))
+                                        def _to_float_or_none(x):
+                                            try:
+                                                if x is None:
+                                                    return None
+                                                if torch.is_tensor(x):
+                                                    x = x.detach()
+                                                    if x.numel() == 1:
+                                                        return float(x.cpu().item())
+                                                    return float(x.float().mean().cpu().item())
+                                                return float(x)
+                                            except Exception:
+                                                return None
 
-                                        g_contact_mean = _to_float(dd.get("g_contact_mean"))
-                                        amp_mean = _to_float(dd.get("amp_mean"))
-                                        p_contact_mean = _to_float(dd.get("p_contact_mean"))
+                                        def _fmt(name, val, fmt=".3f"):
+                                            if val is None or (isinstance(val, float) and math.isnan(val)):
+                                                return f"{name}=NA"
+                                            return f"{name}={val:{fmt}}"
 
-                                        cos_mean = _to_float(dd.get("cos_v_delta_mean"))
-                                        cos_min  = _to_float(dd.get("cos_v_delta_min"))
-                                        cos_max  = _to_float(dd.get("cos_v_delta_max"))
+                                        # ✅（可选）第一次打印 fusion debug keys，确认有哪些字段
+                                        if not hasattr(self, "_dbg_fusion_keys_once"):
+                                            self._dbg_fusion_keys_once = True
+                                            try:
+                                                logger.info(f"[DBG][FUSION_KEYS] {sorted(list(dd.keys()))}")
+                                                self.paep_logger.info(f"[DBG][FUSION_KEYS] {sorted(list(dd.keys()))}")
+                                            except Exception:
+                                                pass
 
-                                        scale_mean = _to_float(dd.get("scale_mean"))
-                                        scale_min  = _to_float(dd.get("scale_min"))
-                                        scale_max  = _to_float(dd.get("scale_max"))
+                                        # ✅只读 fusion 真实提供的 key（见 dual_gated_v_f_fusion_v4.py）
+                                        alpha         = _to_float_or_none(dd.get("alpha"))
+                                        g_contact     = _to_float_or_none(dd.get("g_contact_mean"))
+                                        g_head        = _to_float_or_none(dd.get("g_head_mean"))
 
-                                        # optional: if you also log soft phase means in fusion debug, they will appear here
-                                        p0 = _to_float(dd.get("p_phase0_mean"))
-                                        p1 = _to_float(dd.get("p_phase1_mean"))
-                                        p2 = _to_float(dd.get("p_phase2_mean"))
+                                        v_norm_mean   = _to_float_or_none(dd.get("v_norm_mean"))
+                                        inj_norm_mean = _to_float_or_none(dd.get("inj_norm_mean"))
 
-                                        # derived ratios (what you care about)
-                                        eps_ = 1e-6
-                                        delta_over_v = d_norm_mean / (v_norm_mean + eps_)
-                                        inj_over_v   = inj_norm_mean / (v_norm_mean + eps_)
+                                        # ✅强烈建议用 fusion 直接算好的 inj_over_v_mean（更稳）
+                                        inj_over_v    = _to_float_or_none(dd.get("inj_over_v_mean"))
+
+                                        # ✅注意 key 名：fusion 里是 cos_vd_mean，不是 cos_v_delta_mean
+                                        cos_vd_mean   = _to_float_or_none(dd.get("cos_vd_mean"))
+
+                                        # （可选）如果你未来把这些字段也写进 fusion，这里再读；否则保持 NA
+                                        d_norm_mean   = _to_float_or_none(dd.get("delta_norm_mean"))
+                                        scale_mean    = _to_float_or_none(dd.get("scale_mean"))
 
                                         dbg_msg = (
                                             f"infer_step={infer_step} step={step_count} "
-                                            f"v_norm_mean={v_norm_mean:.3f} v_norm_max={v_norm_max:.3f} "
-                                            f"delta_norm_mean={d_norm_mean:.3f} delta_norm_max={d_norm_max:.3f} "
-                                            f"inj_norm_mean={inj_norm_mean:.3f} inj_norm_max={inj_norm_max:.3f} "
-                                            f"delta_over_v={delta_over_v:.3f} inj_over_v={inj_over_v:.3f} "
-                                            f"inj_raw_mean={inj_raw_mean:.3f} eff_ratio_mean={eff_ratio_mean:.3f} realized_ratio_mean={realized_ratio_mean:.3f} "
-                                            f"g_contact_mean={g_contact_mean:.3f} amp_mean={amp_mean:.3f} p_contact_mean={p_contact_mean:.3f} "
-                                            f"cos_vd_mean={cos_mean:.3f} cos_vd_min={cos_min:.3f} cos_vd_max={cos_max:.3f} "
-                                            f"scale_mean={scale_mean:.4f} scale_min={scale_min:.4f} scale_max={scale_max:.4f} "
-                                            f"p_phase_mean=[{p0:.3f},{p1:.3f},{p2:.3f}]"
+                                            + _fmt("alpha", alpha, ".4f") + " "
+                                            + _fmt("g_contact", g_contact, ".3f") + " "
+                                            + _fmt("g_head", g_head, ".3f") + " "
+                                            + _fmt("v_norm", v_norm_mean, ".3f") + " "
+                                            + _fmt("inj_norm", inj_norm_mean, ".3f") + " "
+                                            + _fmt("inj_over_v", inj_over_v, ".3f") + " "
+                                            + _fmt("cos_vd", cos_vd_mean, ".3f") + " "
+                                            + _fmt("delta_norm", d_norm_mean, ".3f") + " "
+                                            + _fmt("scale", scale_mean, ".4f")
                                         )
 
                                         logger.info("[DBG][FUSION] " + dbg_msg)
@@ -882,7 +914,7 @@ class RealRunner:
                                     pass
 
 
-                        # --- PAEP phase logging (policy v2) ---
+                        # --- PAEP phase logging (policy v4) ---
                         if "paep_phase_id" in np_action_dict:
                             phase_id = int(np.array(np_action_dict["paep_phase_id"]).reshape(-1)[0])
 

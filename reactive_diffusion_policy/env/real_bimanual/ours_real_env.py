@@ -435,10 +435,10 @@ class RealRobotEnvironment(Node):
         grasp_force = self.grasp_force
         gripper_control_width_precision = self.gripper_control_width_precision
         left_current_width = robot_states.leftGripperState[0]
-        print("left_gripper_width_target", left_gripper_width_target)
-        print("gripper_control_width_precision", gripper_control_width_precision)
-        print("enable_gripper_interval_control", self.enable_gripper_interval_control)
-        print("left_current_width", left_current_width)
+        # print("left_gripper_width_target", left_gripper_width_target)
+        # print("gripper_control_width_precision", gripper_control_width_precision)
+        # print("enable_gripper_interval_control", self.enable_gripper_interval_control)
+        # print("left_current_width", left_current_width)
 
         if abs(self.last_gripper_width_target[0] - left_gripper_width_target) >= gripper_control_width_precision:
             if self.use_force_control_for_gripper and self.last_gripper_width_target[0] > left_gripper_width_target:

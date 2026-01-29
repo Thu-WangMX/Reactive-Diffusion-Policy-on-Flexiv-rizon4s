@@ -36,7 +36,7 @@ policy:
   #training.save_epoch_ckpt_every: 100
 
   # ---- PAEP checkpoint ----
-  paep_ckpt: /home/ubuntu/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/PAEP/best.pt
+  paep_ckpt: /home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/PAEP/paep_future_ckpt/paep_runs_0124/best.pt
   gmin: 0.0
   freeze_paep: True
 
