@@ -1,0 +1,46 @@
+{
+  "phase_names": [
+    "approach",
+    "progress",
+    "done"
+  ],
+  "active_phase_names": [
+    "progress"
+  ],
+  "HIST": 8,
+  "d_base": 9,
+  "d_paep": 4,
+  "epochs": 50,
+  "batch": 2048,
+  "lr": 0.001,
+  "weight_decay": 0.0,
+  "W_DP": 1.0,
+  "W_ROT": 0.0,
+  "BASE_WEIGHT": 0.1,
+  "ACTIVE_BOOST": 1.0,
+  "SAMPLER_ALPHA": 5.0,
+  "active_ratio_train": 0.401475893735651,
+  "active_ratio_val": 0.3932683790965456,
+  "wrench_norm": {
+    "mean": [
+      -0.02411678433418274,
+      1.461220145225525,
+      -7.4603776931762695,
+      -0.09146326035261154,
+      0.007944430224597454,
+      0.0034552623983472586
+    ],
+    "std": [
+      1.0968477725982666,
+      2.6127524375915527,
+      13.15311336517334,
+      0.15659984946250916,
+      0.06296301633119583,
+      0.013639276847243309
+    ]
+  },
+  "wrench_clip_ratio_global": 0.0011807420964075922,
+  "num_subspace": 1,
+  "out_dir": "/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/Fast/train_fast_wiping_v2_run1",
+  "device": "cuda"
+}

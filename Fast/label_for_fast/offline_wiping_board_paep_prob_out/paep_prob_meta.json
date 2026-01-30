@@ -1,0 +1,28 @@
+{
+  "zarr_path": "/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/dataset/wiping_board_stream_downsample1_zarr/replay_buffer.zarr",
+  "zarr_group": "data",
+  "paep_ckpt": "/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/PAEP/paep_future_ckpt/paep_runs_0124/best.pt",
+  "cfg_used": {
+    "force_hist": 48,
+    "img_size": 224,
+    "force_encoder": "tcn",
+    "tcn": {
+      "channels": 256,
+      "kernel": 5,
+      "blocks": 4,
+      "dropout": 0.0,
+      "pool": "mean"
+    }
+  },
+  "has_norm_in_ckpt": true,
+  "stats": {
+    "p_contact_min": 1.86077103546933e-22,
+    "p_contact_max": 1.0,
+    "p_contact_mean": 0.41169264912605286,
+    "p_phase_mean": [
+      0.3898944854736328,
+      0.42907896637916565,
+      0.18102654814720154
+    ]
+  }
+}

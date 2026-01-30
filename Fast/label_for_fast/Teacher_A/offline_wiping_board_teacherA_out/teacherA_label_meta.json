@@ -1,0 +1,22 @@
+{
+  "task": "wmx_paep_real_wiping_board_image_dp_absolute_24fps",
+  "config_name": "train_paep_diffusion_unet_real_image_workspace",
+  "diff_ckpt_path": "/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/ckpt/OURS_v4_0128/epoch0400-train_loss0.001.ckpt",
+  "use_ema": true,
+  "num_inference_steps": 8,
+  "dataset_path": "/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/dataset/wiping_board_stream_downsample1_zarr",
+  "T": 33877,
+  "control_fps": 24,
+  "inference_fps": 8,
+  "steps_per_inference": 3,
+  "tcp_action_update_interval": 6,
+  "latency_step": 2,
+  "n_obs_steps": 2,
+  "obs_temporal_downsample_ratio": 2,
+  "force_hist": 48,
+  "wrench_hist_pad_mode": "repeat_first",
+  "mse": 5.580040718423505e-05,
+  "mae": 0.0019731050164460474,
+  "out_slow": "/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/Fast/label_for_fast/offline_wiping_board_teacherA_out/teacherA_slow_exec_9d.npy",
+  "out_fast": "/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/Fast/label_for_fast/offline_wiping_board_teacherA_out/teacherA_fast_label_9d.npy"
+}

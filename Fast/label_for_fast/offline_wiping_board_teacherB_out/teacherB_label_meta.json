@@ -1,0 +1,22 @@
+{
+  "zarr_path": "/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/dataset/wiping_board_stream_downsample1_zarr/replay_buffer.zarr",
+  "teacherA_slow_exec_path": "/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/Fast/label_for_fast/offline_wiping_board_teacherA_out/teacherA_slow_exec_9d.npy",
+  "T": 33877,
+  "keys_used": [
+    "left_robot_tcp_wrench",
+    "paep_phase",
+    "paep_contact"
+  ],
+  "phase_progress": 1,
+  "contact_th": 0.5,
+  "fz_index": 2,
+  "fz_target": -20.0,
+  "k_stiff": 8000.0,
+  "compliance_m_per_N": 0.000125,
+  "dz_clip_m": 0.003,
+  "active_frames": 13302,
+  "dz_tool_mean_m": 0.000243228321778588,
+  "dz_tool_abs_max_m": 0.003000000026077032,
+  "out_virtual": "/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/Fast/label_for_fast/offline_wiping_board_teacherB_out/teacherB_virtual_target_9d.npy",
+  "out_label": "/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/Fast/label_for_fast/offline_wiping_board_teacherB_out/teacherB_fast_label_9d.npy"
+}

@@ -1,0 +1,14 @@
+{
+  "T": 33877,
+  "nan_cnt": 0,
+  "inf_cnt": 0,
+  "phase_prob_sum_mean": 1.0,
+  "phase_prob_sum_std": 2.7132898594572907e-08,
+  "phase_prob_min": 7.314777983775545e-43,
+  "phase_prob_max": 1.0,
+  "contact_prob_min": 1.86077103546933e-22,
+  "contact_prob_max": 1.0,
+  "phase_acc_argmax_vs_hard": 0.9733447471735986,
+  "contact_acc_thr0.5_vs_hard": 0.9770936033296928,
+  "contact_auc_vs_hard": 0.9959946968937148
+}
