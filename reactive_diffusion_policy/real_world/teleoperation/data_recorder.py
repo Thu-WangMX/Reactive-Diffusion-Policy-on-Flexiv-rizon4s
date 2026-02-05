@@ -116,12 +116,12 @@ class DataRecorder(Node):
         
         filtered_subs_name_type = []
         for name, msg_type in subs_name_type:
-            # 去掉所有 /right_* 的机器人状态话题
-            if name.startswith('/right_'):
-                continue
-            # 如果将来 device_mapping 里有右手腕/右夹爪相机，也一并过滤
-            if 'right_wrist_camera' in name:
-                continue
+            # # 去掉所有 /right_* 的机器人状态话题
+            # if name.startswith('/right_'):
+            #     continue
+            # # 如果将来 device_mapping 里有右手腕/右夹爪相机，也一并过滤
+            # if 'right_wrist_camera' in name:
+            #     continue
             if 'right_gripper_camera' in name:
                 continue
             filtered_subs_name_type.append((name, msg_type))

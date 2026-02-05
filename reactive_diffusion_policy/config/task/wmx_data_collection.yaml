@@ -12,8 +12,8 @@ teleop_server:
   gripper_control_width_precision: 0.005
   gripper_never_open: False
   # teleoperation mode
-  #teleop_mode: 'left_arm_6DOF'
-  teleop_mode: 'left_arm_3D_translation_Z_rotation' # wiping board
+  teleop_mode: 'left_arm_6DOF'
+  #teleop_mode: 'left_arm_3D_translation_Z_rotation' # wiping board
   relative_translation_scale: 1.0  # for dexterous teleoperation
   bimanual_teleop: &bimanual_teleop False
 
@@ -22,7 +22,9 @@ robot_server:
 
 publisher:
   # two realsense cameras
-  realsense_camera_publisher: 
+  realsense_camera_publisher:
+
+     
     - camera_serial_number: '213622074024'
       camera_type: 'D400'
       camera_name: 'external_camera'
@@ -33,6 +35,19 @@ publisher:
       decimate: 2  # (0-4) decimation_filter magnitude for point cloud
       cpu_core_id:
         - 10
+
+    # 低部相机
+    - camera_serial_number: '152122079499'
+      camera_type: 'D400'
+      camera_name: 'right_wrist_camera' # 或 '新增的low_camera'
+      rgb_resolution: [640, 480]
+      depth_resolution: [640, 480]
+      random_sample_point_num: 3000
+      fps: 24
+      decimate: 2
+      enable_streaming: False # 如果不需要在 VR 里看，可保持 False 节省带宽
+      cpu_core_id:
+        - 12 # 分配独立核心避免多相机采集冲突
     - camera_serial_number: '150622073398'
       camera_type: 'D400'  
       camera_name: 'left_wrist_camera'
@@ -52,6 +67,7 @@ publisher:
           scale: [ 0.005, 0.005, 0.005 ]
       cpu_core_id:
         - 10
+
   # # USB camera (GelSight)
   usb_camera_publisher:
     - camera_name: 'left_gripper_camera_1'

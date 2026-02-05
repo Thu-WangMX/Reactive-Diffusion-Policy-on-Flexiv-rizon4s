@@ -70,12 +70,12 @@ class RealRobotEnvironment(Node):
                  max_fps: int = 30,
                  # gripper control parameters
                  use_force_control_for_gripper: bool = True,
-                 max_gripper_width: float = 0.05,
+                 max_gripper_width: float = 0.1,
                  min_gripper_width: float = 0.,
                  grasp_force: float = 5.0,
                  enable_gripper_interval_control: bool = False,
                  gripper_control_time_interval: float = 60,
-                 gripper_control_width_precision: float = 0.02,
+                 gripper_control_width_precision: float = 0.005,
                  gripper_width_threshold: float = 0.04,
                  enable_gripper_width_clipping: bool = True,
                  enable_exp_recording: bool = False,
@@ -89,6 +89,13 @@ class RealRobotEnvironment(Node):
         self.robot_server_port = robot_server_port
         self.transforms = transforms
         self.max_fps = max_fps
+
+        # --- gripper close latch ---
+        self.enable_gripper_close_latch = True
+        self.gripper_close_latch_eps = 1e-3  # 1mm
+        self._gripper_closing_latched_left = False
+        self._gripper_last_cmd_left = None
+
 
         # gripper control parameters
         self.use_force_control_for_gripper = use_force_control_for_gripper
@@ -336,6 +343,10 @@ class RealRobotEnvironment(Node):
         self.start_gripper_interval_control = False
         self.obs_buffer.reset()
 
+        self._gripper_closing_latched_left = False
+        self._gripper_last_cmd_left = None
+
+
         # ---- IMPORTANT: clear fast-path cache per episode ----
         with self.mutex:
             self.latest_left_robot_tcp_wrench = None
@@ -412,6 +423,22 @@ class RealRobotEnvironment(Node):
         self.last_gripper_width_target[1] = right_gripper_width_target
 
     def send_gripper_command(self, left_gripper_width_target: float, right_gripper_width_target: float, is_bimanual: bool = False):
+        # --- Close latch: once closing trend starts, forbid reopening ---
+        if getattr(self, "enable_gripper_close_latch", False):
+            left_gripper_width_target = float(np.clip(left_gripper_width_target, 0.0, self.max_gripper_width))
+
+            if self._gripper_last_cmd_left is None:
+                self._gripper_last_cmd_left = left_gripper_width_target
+            else:
+                if (not self._gripper_closing_latched_left) and \
+                (left_gripper_width_target < self._gripper_last_cmd_left - self.gripper_close_latch_eps):
+                    self._gripper_closing_latched_left = True
+
+                if self._gripper_closing_latched_left:
+                    left_gripper_width_target = min(left_gripper_width_target, self._gripper_last_cmd_left)
+
+                self._gripper_last_cmd_left = left_gripper_width_target
+
         if self.enable_gripper_interval_control and self.start_gripper_interval_control:
             self.gripper_interval_count += 1
             if self.gripper_interval_count % self.gripper_control_time_interval == 0:
@@ -439,6 +466,10 @@ class RealRobotEnvironment(Node):
         # print("gripper_control_width_precision", gripper_control_width_precision)
         # print("enable_gripper_interval_control", self.enable_gripper_interval_control)
         # print("left_current_width", left_current_width)
+        
+        gripper_control_width_precision = self.gripper_control_width_precision
+        if getattr(self, "_gripper_closing_latched_left", False):
+            gripper_control_width_precision = min(gripper_control_width_precision, 0.001)
 
         if abs(self.last_gripper_width_target[0] - left_gripper_width_target) >= gripper_control_width_precision:
             if self.use_force_control_for_gripper and self.last_gripper_width_target[0] > left_gripper_width_target:
@@ -476,7 +507,9 @@ class RealRobotEnvironment(Node):
                     })
                 self.last_gripper_width_target[1] = right_gripper_width_target
 
-    def execute_action(self, action: np.ndarray, use_relative_action: bool = False, is_bimanual: bool = False) -> None:
+    #def execute_action(self, action: np.ndarray, use_relative_action: bool = False, is_bimanual: bool = False) -> None:
+    def execute_action(self, action: np.ndarray, use_relative_action: bool = False, is_bimanual: bool = False, phase_id=None) -> None:
+
         left_action = action[:8]
         right_action = action[8:]
 
@@ -495,9 +528,28 @@ class RealRobotEnvironment(Node):
         left_tcp_target_7d_in_robot = pose_6d_to_pose_7d(left_tcp_target_6d_in_robot)
         right_tcp_target_7d_in_robot = pose_6d_to_pose_7d(right_tcp_target_6d_in_robot)
 
-        self.send_command('/move_tcp/left', {'target_tcp': left_tcp_target_7d_in_robot.tolist()})
+        # self.send_command('/move_tcp/left', {'target_tcp': left_tcp_target_7d_in_robot.tolist()})
+        # if is_bimanual:
+        #     self.send_command('/move_tcp/right', {'target_tcp': right_tcp_target_7d_in_robot.tolist()})
+        # --- build move_tcp payload with optional phase_id ---
+        left_payload = {'target_tcp': left_tcp_target_7d_in_robot.tolist()}
+        if phase_id is not None:
+            try:
+                left_payload['phase_id'] = int(phase_id)
+            except Exception:
+                # 如果 phase_id 是奇怪类型（比如字符串/np类型），兜底不传
+                pass
+        self.send_command('/move_tcp/left', left_payload)
+
         if is_bimanual:
-            self.send_command('/move_tcp/right', {'target_tcp': right_tcp_target_7d_in_robot.tolist()})
+            right_payload = {'target_tcp': right_tcp_target_7d_in_robot.tolist()}
+            if phase_id is not None:
+                try:
+                    right_payload['phase_id'] = int(phase_id)
+                except Exception:
+                    pass
+            self.send_command('/move_tcp/right', right_payload)
+
 
     def get_vcamera_image(self):
         response = self.session.get(f'http://{self.vcamera_server_ip}:{self.vcamera_server_port}/peek_latest_capture')

@@ -22,11 +22,12 @@ DRAW_FORCE = False             # 同上
 
 USE_ABSOLUTE_ACTION = True
 
-TAG = 'wiping_board'  # 任务名称，对应 data 目录名
+TAG = 'plug_in_charger'  # 任务名称，对应 data 目录名
 ACTION_DIM = 10  # 我们现在只支持 4 或 10，其他 raise
-TEMPORAL_DOWNSAMPLE_RATIO = 2  # 每条 episode 内的时间下采样比例
+TEMPORAL_DOWNSAMPLE_RATIO = 1  # 每条 episode 内的时间下采样比例
 
-SENSOR_MODE = 'single_arm_two_realsense_two_tactile'
+#SENSOR_MODE = 'single_arm_two_realsense_two_tactile' # wiping_board
+SENSOR_MODE = 'single_arm_three_realsense_two_tactile' #plug_in_charger,加了一个low camera
 GELSIGHT_PCA_PATH = 'data/PCA_Transform_GelSight'
 MCTAC_PCA_PATH = 'data/PCA_Transform_McTAC_v1'
 PCA_DIM = 15
@@ -148,6 +149,7 @@ if __name__ == '__main__':
         ts_list = []
         ext_img_list = []
         left_wrist_img_list = []
+        right_wrist_img_list = []
         left_tcp_pose_list = []
         left_tcp_vel_list = []
         left_tcp_wrench_list = []
@@ -193,7 +195,7 @@ if __name__ == '__main__':
             # 图像
             ext_img_list.append(np.asarray(obs_dict['external_img'], dtype=np.uint8))
             left_wrist_img_list.append(np.asarray(obs_dict['left_wrist_img'], dtype=np.uint8))
-
+            right_wrist_img_list.append(np.asarray(obs_dict['right_wrist_img'], dtype=np.uint8))
             if DEBUG:
                 # 可视化用，按需打开
                 visualize_rgb_image(sensor_msg.externalCameraRGB, 'External Camera RGB')
@@ -218,7 +220,8 @@ if __name__ == '__main__':
         left_tau_ext_arr = np.stack(left_tau_ext_list, axis=0)            # (T, 7)
         ext_img_arr = np.stack(ext_img_list, axis=0)                      # (T, H, W, 3)
         left_wrist_img_arr = np.stack(left_wrist_img_list, axis=0)        # (T, H, W, 3)
-
+        right_wrist_img_arr = np.stack(right_wrist_img_list, axis=0)      # (T, H, W, 3)
+    
         T = ts_arr.shape[0]
         logger.info(f'  Sequence {seq_idx} has {T} frames before downsampling.')
 
@@ -262,6 +265,7 @@ if __name__ == '__main__':
             left_tau_ext_arr = left_tau_ext_arr[keep_idx]
             ext_img_arr = ext_img_arr[keep_idx]
             left_wrist_img_arr = left_wrist_img_arr[keep_idx]
+            right_wrist_img_arr = right_wrist_img_arr[keep_idx]
             state_arr = state_arr[keep_idx]
             action_arr = action_arr[keep_idx]
 
@@ -296,7 +300,7 @@ if __name__ == '__main__':
             # 图像 chunk 大小
             H_ext, W_ext = ext_img_arr.shape[1], ext_img_arr.shape[2]
             H_wrist, W_wrist = left_wrist_img_arr.shape[1], left_wrist_img_arr.shape[2]
-
+            H_right_wrist, W_right_wrist = right_wrist_img_arr.shape[1], right_wrist_img_arr.shape[2]
             ds_timestamp = zarr_data.create_dataset(
                 'timestamp',
                 shape=(0,),
@@ -393,6 +397,15 @@ if __name__ == '__main__':
                 dtype='uint8',
                 compressor=compressor,
             )
+            # 在 ds_left_wrist_img 下方增加
+            ds_right_wrist_img = zarr_data.create_dataset(
+                'right_wrist_img',
+                shape=(0, H_right_wrist, W_right_wrist, 3), # 注意此处 shape 必须与 pkl 解析一致
+                maxshape=(None, H_right_wrist, W_right_wrist, 3),
+                chunks=(100, H_right_wrist, W_right_wrist, 3),
+                dtype='uint8',
+                compressor=compressor,
+            )
 
         # # ---------- 追加当前 episode 数据到 zarr ----------
         # new_total_len = total_len + T_ds
@@ -480,7 +493,9 @@ if __name__ == '__main__':
                                   left_wrist_img_arr.shape[2],
                                   left_wrist_img_arr.shape[3]))
         ds_left_wrist_img[total_len:new_total_len, ...] = left_wrist_img_arr
-
+        
+        ds_right_wrist_img.resize((new_total_len, right_wrist_img_arr.shape[1], right_wrist_img_arr.shape[2], right_wrist_img_arr.shape[3]))
+        ds_right_wrist_img[total_len:new_total_len, ...] = right_wrist_img_arr
 
         total_len = new_total_len
         episode_ends.append(total_len)

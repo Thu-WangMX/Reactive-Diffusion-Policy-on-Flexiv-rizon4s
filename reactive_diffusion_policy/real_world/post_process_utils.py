@@ -49,7 +49,7 @@ class DataPostProcessingManager:
         obs_dict['right_robot_tcp_wrench'] = sensor_msg.rightRobotTCPWrench
         obs_dict['right_robot_gripper_width'] = sensor_msg.rightRobotGripperState[0][np.newaxis]
         obs_dict['right_robot_gripper_force'] = sensor_msg.rightRobotGripperState[1][np.newaxis]
-
+    
         if self.use_6d_rotation:
             obs_dict['left_robot_tcp_pose'] = pose_6d_to_pose_9d(sensor_msg.leftRobotTCP)
             obs_dict['right_robot_tcp_pose'] = pose_6d_to_pose_9d(sensor_msg.rightRobotTCP)
@@ -84,7 +84,7 @@ class DataPostProcessingManager:
         if self.debug:
             visualize_rgb_image(obs_dict['left_gripper1_img'])
             visualize_rgb_image(obs_dict['left_gripper2_img'])
-        if self.mode == SensorMode.single_arm_two_realsense_two_tactile or self.mode == SensorMode.dual_arm_two_realsense_four_tactile:
+        if self.mode == SensorMode.single_arm_two_realsense_two_tactile or self.mode == SensorMode.dual_arm_two_realsense_four_tactile or self.mode == SensorMode.single_arm_three_realsense_two_tactile:
             # obs_dict['left_gripper1_initial_marker'] = sensor_msg.leftGripperCameraMarker1
             # obs_dict['left_gripper1_marker_offset'] = sensor_msg.leftGripperCameraMarkerOffset1
             # obs_dict['left_gripper2_initial_marker'] = sensor_msg.leftGripperCameraMarker2
@@ -105,8 +105,13 @@ class DataPostProcessingManager:
                 pass
             if self.mode == SensorMode.single_arm_two_realsense_two_tactile:
                 return obs_dict
+            
+        # 修改：如果模式包含第三个相机，或者 sensor_msg 里真的有这个数据，就提取出来
+        if self.mode == SensorMode.single_arm_three_realsense_two_tactile or \
+           (hasattr(sensor_msg, 'rightWristCameraRGB') and sensor_msg.rightWristCameraRGB is not None):
+             obs_dict['right_wrist_img'] = self.resize_image_by_size(sensor_msg.rightWristCameraRGB, size=self.resize_shape)
 
-        # obs_dict['right_wrist_img'] = self.resize_image_by_size(sensor_msg.rightWristCameraRGB, size=self.resize_shape)
+        #obs_dict['right_wrist_img'] = self.resize_image_by_size(sensor_msg.rightWristCameraRGB, size=self.resize_shape)
         # obs_dict['right_gripper1_img'] = self.resize_image_by_size(sensor_msg.rightGripperCameraRGB1, size=self.resize_shape)
         # obs_dict['right_gripper2_img'] = self.resize_image_by_size(sensor_msg.rightGripperCameraRGB2, size=self.resize_shape)
         if self.debug:
@@ -131,6 +136,9 @@ class DataPostProcessingManager:
                 except ValueError as e:
                     obs_dict['right_gripper2_marker_offset_emb'] = sensor_msg.rightGripperCameraMarkerOffset2.reshape(-1)
 
+            return obs_dict
+        # 修改：新增这几行，遇到你的新模式直接返回数据，不然会报错 NotImplementedError
+        if self.mode == SensorMode.single_arm_three_realsense_two_tactile:
             return obs_dict
         else:
             raise NotImplementedError

@@ -152,8 +152,8 @@ class RealsenseCameraPublisher(Node):
         self.color_sensor = device.first_color_sensor()
         self.color_sensor.set_option(rs.option.global_time_enabled, 1)
         # realsense exposure
-        #self.set_exposure(exposure=self.exposure, gain=0)
-        self.set_exposure(exposure=None, gain=None)#设置自动曝光
+        self.set_exposure(exposure=self.exposure, gain=0)
+        #self.set_exposure(exposure=None, gain=None)#设置自动曝光
         print("已设置为自动曝光")
         # realsense white balance
         self.set_white_balance(white_balance=self.white_balance)

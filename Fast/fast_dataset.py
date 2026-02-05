@@ -1,242 +1,187 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
-"""
-fast_dataset.py (v2)
-
-Task-specific Fast residual dataset.
-- Inputs (history window HIST):
-  base_abs_9d(t): teacherA slow exec absolute pose (9D)
-  wrench_hist(t): (HIST, 6) normalized + clipped
-  paep_prob(t): p_contact (1) + p_phase (K) as soft semantic condition
-  (optional) pose_err_9d(t): inv(base_abs) * meas_abs  (kept as interface, off by default)
-
-- Targets:
-  delta_rel_9d(t): TeacherB residual label (9D)
-
-- Provides:
-  sample_weight(t): soft weight = base + active_boost * [p_contact * sum(p_phase over active phases)]
-  hard_active(t): (p_contact>=0.5) & (argmax(p_phase) in active phases)  (for stats/sampling)
-"""
-
+# fast_dataset.py
+import json
 import os
+from typing import Optional, Sequence
+
 import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from reactive_diffusion_policy.common.replay_buffer import ReplayBuffer
+
+def _load_npy(x: str) -> np.ndarray:
+    arr = np.load(x)
+    if isinstance(arr, np.lib.npyio.NpzFile):
+        k0 = list(arr.keys())[0]
+        arr = arr[k0]
+    return np.asarray(arr)
 
 
-# =========================
-# Config (edit here)
-# =========================
-# --- data paths ---
-ZARR_PATH = "/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/dataset/wiping_board_stream_downsample1_zarr/replay_buffer.zarr"
-
-# teacherB label (relative residual 9D)
-TEACHERB_DIR = "/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/Fast/label_for_fast/offline_wiping_board_teacherB_out"
-RB_LABEL_PATH = os.path.join(TEACHERB_DIR, "teacherB_fast_label_9d.npy")  # (T,9)
-
-# teacherA slow exec abs 9D (as base input)
-TEACHERA_DIR = "/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/Fast/label_for_fast/Teacher_A/offline_wiping_board_teacherA_out"
-BASE_ABS_PATH = os.path.join(TEACHERA_DIR, "teacherA_slow_exec_9d.npy")   # (T,9)
-
-# (optional) measured abs 9D for pose_err interface (keep for future; off for now)
-USE_MEAS_ABS = False
-MEAS_ABS_PATH = os.path.join(TEACHERA_DIR, "teacherA_meas_abs_9d.npy")    # (T,9) if you have it
-
-# PAEP offline prob output dir (you already have)
-PAEP_PROB_DIR = "/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/Fast/label_for_fast/offline_wiping_board_paep_prob_out"
-PAEP_PHASE_PROB_PATH = os.path.join(PAEP_PROB_DIR, "paep_prob_phase.npy")     # (T,K)
-PAEP_CONTACT_PROB_PATH = os.path.join(PAEP_PROB_DIR, "paep_prob_contact.npy") # (T,1)
-
-# zarr key
-KEY_WRENCH = "left_robot_tcp_wrench"   # (T,6)
-
-# --- task phases (per-task config) ---
-# wiping: 3 phases
-PHASE_NAMES = ["approach", "progress", "done"]
-ACTIVE_PHASE_NAMES = ["progress"]          # emphasize correction learning in these phases
-
-# plug-in example (later you can switch):
-# PHASE_NAMES = ["approach", "search", "retreat", "insert"]
-# ACTIVE_PHASE_NAMES = ["search", "insert"]
-
-# --- temporal window ---
-HIST = 8
-STRIDE = 1
-
-# --- split ---
-SEED = 42
-VAL_RATIO = 0.1
-
-# --- wrench normalize + clip ---
-WRENCH_EPS = 1e-6
-WRENCH_CLIP_NORM = 6.0   # clip AFTER normalization: clip(z, -c, c)
-
-# --- weight / active definition ---
-CONTACT_TH = 0.5  # hard-active threshold on p_contact
+def _default_time_split(T: int, split: str) -> np.ndarray:
+    # last 10% as val, rest as train
+    n_val = max(1, int(0.1 * T))
+    if split == "val":
+        return np.arange(T - n_val, T, dtype=np.int64)
+    return np.arange(0, T - n_val, dtype=np.int64)
 
 
-def _build_hist(x: np.ndarray, hist: int) -> np.ndarray:
+def _parse_split_json(split_json: str, split: str, T: int) -> Optional[np.ndarray]:
     """
-    Right-aligned history windows:
-      x: (T,D) -> out: (T,hist,D)
-    Pad by repeating first available sample.
+    Accept common formats:
+    1) {"train": [...], "val": [...]}
+    2) {"train_idx": [...], "val_idx": [...]}
+    3) {"train": {"idx": [...]}, "val": {"idx": [...]}}
+    If not recognized -> None.
     """
-    assert x.ndim == 2
-    T, D = x.shape
-    out = np.zeros((T, hist, D), dtype=np.float32)
-    for t in range(T):
-        s = max(0, t - hist + 1)
-        chunk = x[s:t+1]
-        if chunk.shape[0] < hist:
-            pad = np.repeat(chunk[:1], repeats=hist - chunk.shape[0], axis=0)
-            chunk = np.concatenate([pad, chunk], axis=0)
-        out[t] = chunk
-    return out
+    if not split_json:
+        return None
+    if not os.path.exists(split_json):
+        return None
+    try:
+        obj = json.load(open(split_json, "r"))
+    except Exception:
+        return None
 
+    keys = [split, f"{split}_idx", f"{split}Idx", f"{split}_indices"]
+    cand = None
+    for k in keys:
+        if k in obj:
+            cand = obj[k]
+            break
+    if cand is None and (split in obj) and isinstance(obj[split], dict) and ("idx" in obj[split]):
+        cand = obj[split]["idx"]
+    if cand is None:
+        return None
 
-def _infer_active_phase_indices(phase_names, active_phase_names):
-    name2idx = {n: i for i, n in enumerate(phase_names)}
-    idx = []
-    for n in active_phase_names:
-        if n not in name2idx:
-            raise ValueError(f"ACTIVE_PHASE_NAMES contains '{n}', but not in PHASE_NAMES={phase_names}")
-        idx.append(name2idx[n])
-    return idx
+    try:
+        idx = np.asarray(cand, dtype=np.int64).reshape(-1)
+        idx = idx[(idx >= 0) & (idx < T)]
+        if idx.size == 0:
+            return None
+        return np.unique(idx)
+    except Exception:
+        return None
 
 
 class FastResidualDataset(Dataset):
     """
-    Returns:
-      base_hist:   (HIST, D_base)  where D_base = 9 (+9 if USE_MEAS_ABS)
-      wrench_hist: (HIST, 6) normalized+clipped
-      paep_hist:   (HIST, 1+K) [p_contact, p_phase(K)]
-      y:           (9,)
-      weight:      scalar float
-      hard_active: scalar float {0,1}
-      t:           int64
+    FAST residual dataset.
+
+    You want fz_target=-20N and “铁律”:
+      fz_err_raw  = Fz - fz_target   (N)
+      fz_err_norm = fz_err_raw / std_z  (std units)
+    deadband is in RAW-N space: |fz_err_raw| < deadband -> 0
+
+    IMPORTANT:
+    - wrench_mean/std MUST be computed on RAW wrench (NOT shifted),
+      because deploy/runtime expects raw stats + optional normalized-space z shift:
+        w_norm_z -= fz_target/std_z
     """
-    def __init__(self, split="train"):
-        assert split in ["train", "val"]
+    def __init__(
+        self,
+        base_abs_npy: str,
+        wrench_npy: str,
+        paep_npy: str,
+        delta_rel_npy: str,
+        split_json: str = "",
+        split: str = "train",
+        hist: int = 8,
+        stride: int = 1,
+        wrench_clip_norm: float = 6.0,
+        wrench_mean: Optional[Sequence[float]] = None,
+        wrench_std: Optional[Sequence[float]] = None,
+        fz_target: float = -20.0,
+        fz_deadband: float = 0.5,
+    ):
+        assert split in ("train", "val", "test"), f"split must be train/val/test, got {split}"
         self.split = split
+        self.hist = int(hist)
+        self.stride = max(1, int(stride))
+        self.wrench_clip_norm = float(wrench_clip_norm)
 
-        self.phase_names = list(PHASE_NAMES)
-        self.active_phase_idx = _infer_active_phase_indices(self.phase_names, ACTIVE_PHASE_NAMES)
-        self.phase_dim = len(self.phase_names)
+        self.fz_target = float(fz_target)
+        self.fz_deadband = float(fz_deadband)
 
-        # ---------- load labels / base ----------
-        y = np.load(RB_LABEL_PATH).astype(np.float32)         # (T,9)
-        base_abs = np.load(BASE_ABS_PATH).astype(np.float32)  # (T,9)
-        assert y.shape[0] == base_abs.shape[0] and y.shape[1] == 9 and base_abs.shape[1] == 9
-        T = int(y.shape[0])
+        base = _load_npy(base_abs_npy).astype(np.float32)     # (T,9)
+        wrench = _load_npy(wrench_npy).astype(np.float32)     # (T,6) raw
+        paep = _load_npy(paep_npy).astype(np.float32)         # (T,d)
+        y = _load_npy(delta_rel_npy).astype(np.float32)       # (T,9)
 
-        # optional measured abs pose
-        if USE_MEAS_ABS:
-            meas_abs = np.load(MEAS_ABS_PATH).astype(np.float32)
-            assert meas_abs.shape == base_abs.shape, f"meas_abs shape {meas_abs.shape} != base_abs {base_abs.shape}"
-        else:
-            meas_abs = None
+        assert base.ndim == 2 and base.shape[1] == 9, f"base_abs9d must be (T,9), got {base.shape}"
+        assert wrench.ndim == 2 and wrench.shape[1] >= 6, f"wrench must be (T,6+), got {wrench.shape}"
+        assert y.ndim == 2 and y.shape[1] == 9, f"delta_rel must be (T,9), got {y.shape}"
+        assert base.shape[0] == wrench.shape[0] == paep.shape[0] == y.shape[0], "T mismatch among inputs"
 
-        # ---------- load PAEP probs ----------
-        p_phase = np.load(PAEP_PHASE_PROB_PATH).astype(np.float32)        # (T,K)
-        p_contact = np.load(PAEP_CONTACT_PROB_PATH).astype(np.float32)    # (T,1) or (T,)
-        if p_contact.ndim == 1:
-            p_contact = p_contact[:, None]
-        assert p_phase.shape[0] == T and p_contact.shape[0] == T
-        assert p_phase.shape[1] == self.phase_dim, \
-            f"PAEP phase prob dim mismatch: got {p_phase.shape[1]}, expect {self.phase_dim} from PHASE_NAMES"
-
-        # ---------- load wrench from zarr ----------
-        rbz = ReplayBuffer.copy_from_path(ZARR_PATH, keys=[KEY_WRENCH])
-        wrench = np.asarray(rbz[KEY_WRENCH][:, :6], dtype=np.float32)
-        assert wrench.shape[0] == T and wrench.shape[1] == 6
-
-        # ---------- compute wrench norm (global) ----------
-        wrench_mean = wrench.mean(axis=0)
-        wrench_std = wrench.std(axis=0)
-        wrench_std = np.maximum(wrench_std, WRENCH_EPS)
-
-        wrench_norm = (wrench - wrench_mean[None, :]) / wrench_std[None, :]
-        # clip
-        wrench_norm_clip = np.clip(wrench_norm, -WRENCH_CLIP_NORM, WRENCH_CLIP_NORM).astype(np.float32)
-
-        # clip stats (for logging)
-        clip_ratio = float(np.mean(np.abs(wrench_norm) > WRENCH_CLIP_NORM))
-
-        # ---------- build base features ----------
-        # base_abs_9d always included
-        base_feat = base_abs.astype(np.float32)
-
-        # pose_err interface (optional): inv(base_abs) * meas_abs
-        # NOTE: keep interface only; for now if USE_MEAS_ABS=False -> not included
-        if USE_MEAS_ABS:
-            # minimal (safe) approx: use delta in xyz only; rot err left as zeros
-            # (you can later replace with proper SE(3) relative computation for rot6d)
-            pose_err = np.zeros_like(base_abs, dtype=np.float32)
-            pose_err[:, :3] = (meas_abs[:, :3] - base_abs[:, :3])
-            base_feat = np.concatenate([base_feat, pose_err], axis=1).astype(np.float32)  # (T,18)
-
-        # ---------- build paep features per step ----------
-        paep_feat = np.concatenate([p_contact, p_phase], axis=1).astype(np.float32)  # (T, 1+K)
-
-        # ---------- compute weights / hard active ----------
-        phase_pred = np.argmax(p_phase, axis=1).astype(np.int64)
-        hard_active = (p_contact[:, 0] >= CONTACT_TH) & np.isin(phase_pred, np.array(self.active_phase_idx, dtype=np.int64))
-        self.hard_active = hard_active.astype(np.float32)
-
-        active_prob = p_contact[:, 0] * np.sum(p_phase[:, self.active_phase_idx], axis=1)  # soft in [0,1]
-        self.active_prob = active_prob.astype(np.float32)
-
-        # ---------- build history windows ----------
-        self.base_hist = _build_hist(base_feat, HIST)                 # (T,HIST,D_base)
-        self.wrench_hist = _build_hist(wrench_norm_clip, HIST)        # (T,HIST,6)
-        self.paep_hist = _build_hist(paep_feat, HIST)                 # (T,HIST,1+K)
-
+        self.base = base
+        self.wrench_raw = wrench[:, :6]
+        self.paep = paep
         self.y = y
-        self.base_abs = base_abs
-        self.T = T
+        self.T = int(base.shape[0])
 
-        # store norm for train script (for reproducibility)
-        self.wrench_mean = wrench_mean.astype(np.float32)
-        self.wrench_std = wrench_std.astype(np.float32)
-        self.wrench_clip_ratio = clip_ratio
+        idx = _parse_split_json(split_json, split, self.T)
+        if idx is None:
+            idx = _default_time_split(self.T, "val" if split == "val" else "train")
+        idx = idx[::self.stride]
+        self.idxs = idx.astype(np.int64)
 
-        # ---------- indices / split ----------
-        valid = np.arange(0, T, STRIDE, dtype=np.int64)
-        rng = np.random.RandomState(SEED)
-        perm = rng.permutation(valid)
-        n_val = int(len(perm) * VAL_RATIO)
-        val_idx = perm[:n_val]
-        train_idx = perm[n_val:]
-        self.indices = train_idx if split == "train" else val_idx
+        # RAW-space mean/std (NO shift here)
+        if (wrench_mean is None) or (wrench_std is None):
+            w = self.wrench_raw[self.idxs]
+            self.wrench_mean = w.mean(axis=0).astype(np.float32)
+            self.wrench_std = w.std(axis=0).astype(np.float32)
+        else:
+            self.wrench_mean = np.asarray(wrench_mean, dtype=np.float32).reshape(-1)[:6]
+            self.wrench_std = np.asarray(wrench_std, dtype=np.float32).reshape(-1)[:6]
+        self.wrench_std = np.maximum(self.wrench_std, 1e-6)
 
-    @property
-    def base_dim(self) -> int:
-        return int(self.base_hist.shape[-1])
+        self.d_base = int(self.base.shape[1])
+        self.d_paep = int(self.paep.shape[1])
 
-    @property
-    def paep_dim(self) -> int:
-        return int(self.paep_hist.shape[-1])
+    def __len__(self) -> int:
+        return int(self.idxs.shape[0])
 
-    def __len__(self):
-        return int(self.indices.shape[0])
+    def _window(self, arr: np.ndarray, t: int, dim: int) -> np.ndarray:
+        t0 = max(0, t - self.hist + 1)
+        x = arr[t0:t + 1]
+        if x.shape[0] < self.hist:
+            pad = np.repeat(x[:1], self.hist - x.shape[0], axis=0)
+            x = np.concatenate([pad, x], axis=0)
+        assert x.shape == (self.hist, dim), f"window expects {(self.hist, dim)}, got {x.shape}"
+        return x
 
     def __getitem__(self, i: int):
-        t = int(self.indices[i])
-        base_h = self.base_hist[t]       # (HIST, D_base)
-        wrench_h = self.wrench_hist[t]   # (HIST, 6)
-        paep_h = self.paep_hist[t]       # (HIST, 1+K)
-        y = self.y[t]                    # (9,)
-        w = self.active_prob[t]          # [0,1] soft
-        m = self.hard_active[t]          # {0,1}
+        t = int(self.idxs[i])
+
+        base_h = self._window(self.base, t, self.d_base)          # (H,9)
+        wrench_h_raw = self._window(self.wrench_raw, t, 6)        # (H,6) raw
+        paep_h = self._window(self.paep, t, self.d_paep)          # (H,d)
+
+        w_norm = (wrench_h_raw - self.wrench_mean[None]) / self.wrench_std[None]
+        w_norm = np.clip(w_norm, -self.wrench_clip_norm, self.wrench_clip_norm).astype(np.float32)
+
+        y = self.y[t].astype(np.float32)                          # (9,)
+
+        # default useful gate weights:
+        pc = float(paep_h[-1, 0]) if (self.d_paep >= 1) else 0.0
+        pc = float(np.clip(pc, 0.0, 1.0))
+        w_soft = np.asarray([pc], dtype=np.float32)
+        m_hard = np.asarray([1.0 if pc > 0.5 else 0.0], dtype=np.float32)
+
+        # RAW + NORM err (deadband in RAW-N space)
+        fz = float(wrench_h_raw[-1, 2])
+        fz_err_raw = float(fz - self.fz_target)
+        if abs(fz_err_raw) < self.fz_deadband:
+            fz_err_raw = 0.0
+        std_z = float(self.wrench_std[2])
+        fz_err_norm = float(fz_err_raw / max(std_z, 1e-6))
+
         return (
-            torch.from_numpy(base_h),
-            torch.from_numpy(wrench_h),
-            torch.from_numpy(paep_h),
-            torch.from_numpy(y),
-            torch.tensor(w, dtype=torch.float32),
-            torch.tensor(m, dtype=torch.float32),
-            torch.tensor(t, dtype=torch.int64),
+            torch.from_numpy(base_h),                        # (H,9)
+            torch.from_numpy(w_norm),                        # (H,6)
+            torch.from_numpy(paep_h),                        # (H,d)
+            torch.from_numpy(y),                             # (9,)
+            torch.from_numpy(w_soft),                        # (1,)
+            torch.from_numpy(m_hard),                        # (1,)
+            torch.tensor(t, dtype=torch.int64),              # scalar
+            torch.tensor(fz_err_raw, dtype=torch.float32),   # scalar (N)
+            torch.tensor(fz_err_norm, dtype=torch.float32),  # scalar (std)
         )

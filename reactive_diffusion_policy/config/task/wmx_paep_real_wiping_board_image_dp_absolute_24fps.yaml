@@ -44,9 +44,12 @@ shape_meta: &shape_meta
 
 
 env_runner:
-  _target_: reactive_diffusion_policy.env_runner.ours_real_runner.RealRunner
+  _target_: reactive_diffusion_policy.env_runner.ours_real_runner_w_fast.RealRunner
   eval_episodes: 10
   max_duration_time: 300
+
+  # action_smoothing_alpha: 0.5
+  # smooth_xyz_only: true
 
   tcp_action_update_interval: 6
   #gripper_action_update_interval: 6
@@ -66,7 +69,7 @@ env_runner:
   #inference_fps: 6
   inference_fps: 8 #每 3 个 control step 推理一次
   n_obs_steps: ${n_obs_steps}
-  obs_temporal_downsample_ratio: 2
+  obs_temporal_downsample_ratio: 1
   task_name: ${task_name}
   transform_params: ${task.transforms}
   shape_meta: *shape_meta
@@ -116,7 +119,22 @@ env_runner:
     gripper_control_time_interval: ${task.teleop_server.gripper_control_time_interval}
     gripper_control_width_precision: ${task.teleop_server.gripper_control_width_precision}
     gripper_width_threshold: 0.046
-    enable_gripper_width_clipping: True
+    enable_gripper_width_clipping: False
+
+  # #Fast policy params
+  enable_fast: False
+  fast_ckpt_path: /home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/Fast/train_fast_wiping_v2_run1/ckpt_best.pt
+  fast_meta_path: /home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/Fast/train_fast_wiping_v2_run1/train_meta.json
+  fast_device: cuda
+  fast_hist_len: 8
+  fast_wrench_clip_norm: 6.0
+  fast_max_delta_xyz: 0.01
+  fast_apply_rot: false
+  fast_gate_mode: soft
+  fast_gate_thr: 0.5
+  fast_gate_use_contact: true
+  fast_active_phase_ids: [1]      # wiping: progress=1
+  fast_debug_log_every: 50
 
 dataset:
   _target_: reactive_diffusion_policy.dataset.real_image_tactile_dataset.RealImageTactileDataset
@@ -131,10 +149,8 @@ dataset:
   wrench_hist_pad_mode: repeat_first
 
   # make dataset sampling consistent with 24Hz (no downsample)
-  obs_temporal_downsample_ratio: 2
+  obs_temporal_downsample_ratio: 1
 
-  action_smoothing_alpha: 0.15
-  smooth_xyz_only: true
 
   horizon: ${horizon}
   pad_before: ${eval:'${dataset_obs_steps}-1+${n_latency_steps}'}

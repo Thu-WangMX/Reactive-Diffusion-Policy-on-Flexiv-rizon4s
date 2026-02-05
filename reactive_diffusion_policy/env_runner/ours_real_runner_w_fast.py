@@ -14,6 +14,10 @@ import py_cli_interaction
 from rclpy.executors import MultiThreadedExecutor
 from omegaconf import DictConfig, ListConfig
 
+import sys
+from dataclasses import dataclass
+
+
 from reactive_diffusion_policy.policy.diffusion_unet_image_policy import DiffusionUnetImagePolicy
 from reactive_diffusion_policy.common.pytorch_util import dict_apply
 from reactive_diffusion_policy.common.precise_sleep import precise_sleep
@@ -38,6 +42,16 @@ import json
 import logging
 import cv2
 from collections import deque
+
+# ---- add Fast runtime to import path (repo_root/Fast) ----
+_THIS_DIR = osp.dirname(osp.abspath(__file__))  # .../reactive_diffusion_policy/env_runner
+_REPO_ROOT = osp.abspath(osp.join(_THIS_DIR, "..", ".."))  # repo root
+_FAST_DIR = osp.join(_REPO_ROOT, "Fast")
+if _FAST_DIR not in sys.path:
+    sys.path.insert(0, _FAST_DIR)
+
+from Fast.fast_deploy_runtime import FastDeployer, FastGateConfig
+
 
 __all__ = ["RealRunner"]
 
@@ -154,14 +168,31 @@ class RealRunner:
         # ---- dense wrench buffer (24Hz) ----
         enable_dense_wrench_hist: bool = True,
         force_hist: int = 48,
+
+        # ---- fast residual (optional) ----
+        enable_fast: bool = False,
+        fast_ckpt_path: str = "",
+        fast_meta_path: str = "",
+        fast_device: str = "cuda",
+        fast_hist_len: Optional[int] = None,
+        fast_wrench_clip_norm: float = 6.0,
+        fast_max_delta_xyz: float = 0.003,
+        fast_apply_rot: bool = False,
+        fast_gate_mode: str = "soft",          # "soft" or "hard"
+        fast_gate_thr: float = 0.5,
+        fast_gate_use_contact: bool = True,
+        fast_active_phase_ids: Optional[ListConfig] = None,  # e.g. [1] for wiping progress
+        fast_debug_log_every: int = 0,
+
     ):
         self.task_name = task_name
         self.transforms = RealWorldTransforms(option=transform_params)
         self.shape_meta = dict(shape_meta)
         self.eval_episodes = eval_episodes
-        
+
         self._phase_lock = threading.Lock()
         self._latest_phase_id = None
+
 
         # --- keys ---
         self.rgb_keys = []
@@ -186,28 +217,28 @@ class RealRunner:
 
         self.output_dir = output_dir
         self.policy_name = task_name if task_name is not None else "ours"
-        #self.paep_logger = self._setup_paep_logger(self.output_dir)
+        self.paep_logger = self._setup_paep_logger(self.output_dir)
 
         self._fz_run_ts = None
         self._fz_run_dir = None
 
-        # self.debug_path = os.path.join(self.output_dir, "debug_run.jsonl")
+        self.debug_path = os.path.join(self.output_dir, "debug_run.jsonl")
 
-        # self._dbg_f = open(self.debug_path, "a", buffering=1)
+        self._dbg_f = open(self.debug_path, "a", buffering=1)
 
-        # self._dbg_step = 0
+        self._dbg_step = 0
 
-        # def _dbg(tag, **kw):
-        #     rec = {
-        #         "t": time.time(),
-        #         "step": int(getattr(self, "_dbg_step", 0)),
-        #         "tag": str(tag),
-        #         **kw,
-        #     }
-        #     json.dump(rec, self._dbg_f)
-        #     self._dbg_f.write("\n")
+        def _dbg(tag, **kw):
+            rec = {
+                "t": time.time(),
+                "step": int(getattr(self, "_dbg_step", 0)),
+                "tag": str(tag),
+                **kw,
+            }
+            json.dump(rec, self._dbg_f)
+            self._dbg_f.write("\n")
 
-        # self._dbg = _dbg
+        self._dbg = _dbg
 
 
         # --- rclpy/env ---
@@ -312,12 +343,49 @@ class RealRunner:
         self._wrench_dense_buf = deque(maxlen=self.force_hist + 64)  # store (6,)
         self._wrench_stop = threading.Event()
         self._wrench_thread = None
-
         # --- dense Fz log (control_fps) ---
         self._fz_dense = []          # list[float]
         self._fz_dense_t = []        # list[float] wall_time
         self._fz_dense_step = []     # list[int]   control-step index within episode
         self._fz_dense_ctr = 0
+
+
+        # ---- fast runtime ----
+        self.enable_fast = bool(enable_fast)
+        self.fast_debug_log_every = int(fast_debug_log_every)
+        self._fast = None
+        self._fast_last_dbg = None
+        self._fast_paep_p_contact = None
+        self._fast_paep_p_phase = None
+
+        if self.enable_fast:
+            if (not fast_ckpt_path) or (not fast_meta_path):
+                raise ValueError("[FAST] enable_fast=True but fast_ckpt_path/fast_meta_path is empty")
+
+            phase_ids = None
+            if fast_active_phase_ids is not None:
+                # ListConfig -> python list
+                phase_ids = [int(x) for x in list(fast_active_phase_ids)]
+
+            gate = FastGateConfig(
+                mode=str(fast_gate_mode),
+                thr=float(fast_gate_thr),
+                use_contact=bool(fast_gate_use_contact),
+                active_phase_ids=phase_ids,
+            )
+
+            self._fast = FastDeployer(
+                ckpt_path=str(fast_ckpt_path),
+                meta_path=str(fast_meta_path),
+                device=str(fast_device),
+                hist_len=None if fast_hist_len is None else int(fast_hist_len),
+                wrench_clip_norm=float(fast_wrench_clip_norm),
+                max_delta_xyz=float(fast_max_delta_xyz),
+                gate=gate,
+                apply_rot=bool(fast_apply_rot),
+                verbose=True,
+            )
+            logger.info("[FAST] enabled ✅")
 
 
     def _setup_paep_logger(self, output_dir: str):
@@ -538,8 +606,156 @@ class RealRunner:
                 tcp_step_action = tcp_step_action[-1][:tcp_len]
                 gripper_step_action = gripper_step_action[-1][tcp_len:]
 
+            # ---- FAST residual injection (abs9d in, abs9d out) ----
+            if self.enable_fast and (self._fast is not None):
+                try:
+                    # your tcp_step_action for left arm is usually (9,) or (3,) etc.
+                    if (tcp_step_action is not None) and (tcp_step_action.shape[0] >= 9):
+                        # latest wrench (6,)
+                        if (self.enable_dense_wrench_hist) and (len(self._wrench_dense_buf) > 0):
+                            wrench6 = np.asarray(self._wrench_dense_buf[-1], dtype=np.float32).reshape(-1)[:6]
+                        else:
+                            wrench6 = np.zeros((6,), dtype=np.float32)
+
+                        base_abs9d = tcp_step_action[:9].astype(np.float32)
+                        cmd_abs9d, dbg = self._fast.step(
+                            base_abs9d=base_abs9d,
+                            wrench6=wrench6,
+                            p_contact=self._fast_paep_p_contact,
+                            p_phase=self._fast_paep_p_phase,
+                        )
+
+                        tcp_step_action = tcp_step_action.copy()
+                        tcp_step_action[:9] = cmd_abs9d
+                        self._fast_last_dbg = dbg
+                        # --- richer debug print + rule check ---
+                        if self.fast_debug_log_every > 0 and (self.action_step_count % self.fast_debug_log_every) == 0:
+                            import math
+
+                            def _arr(x):
+                                if x is None:
+                                    return None
+                                try:
+                                    return np.asarray(x, dtype=np.float32).reshape(-1)
+                                except Exception:
+                                    return None
+
+                            def _f(x, default=float("nan")):
+                                try:
+                                    if x is None:
+                                        return float(default)
+                                    if isinstance(x, (np.floating, float, int)):
+                                        return float(x)
+                                    if isinstance(x, (list, tuple)) and len(x) == 1:
+                                        return float(x[0])
+                                    return float(x)
+                                except Exception:
+                                    return float(default)
+
+                            def _z(v):
+                                v = _arr(v)
+                                return float(v[2]) if (v is not None and v.size >= 3) else float("nan")
+
+                            def _s(v, eps=1e-9):
+                                # sign with deadzone
+                                if v is None or (isinstance(v, float) and (math.isnan(v) or math.isinf(v))):
+                                    return 0
+                                if abs(v) <= eps:
+                                    return 0
+                                return 1 if v > 0 else -1
+
+                            # -------------------------
+                            # 1) wrench: raw + normed (if deployer provides)
+                            # -------------------------
+                            w_raw = _arr(dbg.get("wrench_raw", wrench6))   # fallback to runner's wrench6
+                            w_norm = _arr(dbg.get("wrench_normed", None))  # may be None if deployer not filled
+
+                            fx = float(w_raw[0]) if (w_raw is not None and w_raw.size >= 1) else float("nan")
+                            fy = float(w_raw[1]) if (w_raw is not None and w_raw.size >= 2) else float("nan")
+                            fz = float(w_raw[2]) if (w_raw is not None and w_raw.size >= 3) else float("nan")  # ✅ z-force index=2
+                            tx = float(w_raw[3]) if (w_raw is not None and w_raw.size >= 4) else float("nan")
+                            ty = float(w_raw[4]) if (w_raw is not None and w_raw.size >= 5) else float("nan")
+                            tz = float(w_raw[5]) if (w_raw is not None and w_raw.size >= 6) else float("nan")
+
+                            fz_n = float(w_norm[2]) if (w_norm is not None and w_norm.size >= 3) else float("nan")
+
+                            # -------------------------
+                            # 2) fast output deltas
+                            # -------------------------
+                            dz_pred9 = _z(dbg.get("delta_pred9", None))           # model raw prediction (before alpha)
+                            dz_app9  = _z(dbg.get("delta_applied9", None))        # after alpha (and maybe rot kept)
+                            dz_pre   = _z(dbg.get("delta_p_ee_preclip", None))    # alpha*pred before clip (if exists)
+                            dz_ee    = _z(dbg.get("delta_p_ee", None))            # ee delta AFTER clip
+                            dz_base  = _z(dbg.get("delta_p_base", None))          # base delta AFTER R_base @ dz_ee
+
+                            alpha   = dbg.get("alpha", None)
+                            pc      = dbg.get("pc", None)
+                            phase_id = dbg.get("phase_id", None)
+                            clip_w  = dbg.get("clip_ratio_wrench", None)
+                            clip_dp = dbg.get("clip_ratio_delta", None)
+                            mask_dp = dbg.get("delta_p_ee_clipped_mask", None)
+
+                            # -------------------------
+                            # 3) “铁律”检查：以 fz_target=-20 为例
+                            #    你的定义：更负 => 力更大 => 应该抬起；更正(不够负) => 应该下压
+                            # -------------------------
+                            fz_target = float(dbg.get("fz_target", -20.0))
+                            fz_deadband = float(dbg.get("fz_deadband", 0.5))
+
+                            dz_eps = 1e-6          # delta太小不判断
+
+                            expected = "HOLD"
+                            ok = True
+
+                            if not (math.isnan(fz) or math.isinf(fz)):
+                                err = fz - fz_target
+                                if abs(err) <= fz_deadband:
+                                    expected = "HOLD"
+                                    ok = True
+                                elif err > 0:
+                                    # fz 比 target 更“正”(更不负) => 力偏小 => 该 PRESS_DOWN
+                                    expected = "PRESS_DOWN"
+                                    # 你的口径：PRESS_DOWN => base为负，ee为正（说明 ee-z 与 base-z 方向相反）
+                                    ok_base = (_s(dz_base, dz_eps) == -1)
+                                    ok_ee   = (_s(dz_ee,   dz_eps) == +1)
+                                    ok = bool(ok_base and ok_ee)
+                                else:
+                                    # fz 比 target 更“负” => 力偏大 => 该 LIFT_UP
+                                    expected = "LIFT_UP"
+                                    ok_base = (_s(dz_base, dz_eps) == +1)
+                                    ok_ee   = (_s(dz_ee,   dz_eps) == -1)
+                                    ok = bool(ok_base and ok_ee)
+
+                            # -------------------------
+                            # 4) 打印一行：fast 是否真在工作（alpha/pc/phase） + 铁律是否满足
+                            # -------------------------
+                            logger.info(
+                                f"[FAST_CMP] f_raw=[{fx:+.2f},{fy:+.2f},{fz:+.2f}] "
+                                f"t_raw=[{tx:+.2f},{ty:+.2f},{tz:+.2f}] fz_n={fz_n:+.2f} | "
+                                f"dz_pred9={dz_pred9:+.6f} dz_app9={dz_app9:+.6f} dz_pre={dz_pre:+.6f} | "
+                                f"dz_ee={dz_ee:+.6f} dz_base={dz_base:+.6f} | "
+                                f"alpha={alpha} pc={pc} phase_id={phase_id} clip_w={clip_w} clip_dp={clip_dp} mask={mask_dp}"
+                            )
+
+                            expected = dbg.get("fast_rule_expected", expected)
+                            ok = bool(dbg.get("fast_rule_ok", ok))
+
+                            logger.info(
+                                f"[FAST_RULE] fz={fz:+.3f} target={fz_target:+.1f} deadband={fz_deadband:.1f} "
+                                f"expected={expected} ok={ok} | "
+                                f"dz_base={dz_base:+.6f} dz_ee={dz_ee:+.6f} alpha={alpha} pc={pc} phase_id={phase_id}"
+                            )
+
+
+
+
+
+                except Exception as e:
+                    logger.warning(f"[FAST] injection failed: {repr(e)}")
+
             combined_action = np.concatenate([tcp_step_action, gripper_step_action], axis=-1)
             step_action, is_bimanual = self.post_process_action(combined_action[np.newaxis, :])
+
             step_action = step_action.squeeze(0)
 
             # ---- EMA smoothing (optional) ----
@@ -548,14 +764,17 @@ class RealRunner:
                 if self._last_step_action is None:
                     self._last_step_action = step_action.copy()
                 else:
-                    if self.smooth_xyz_only:
-                        sm = step_action.copy()
-                        sm[:3] = (1 - a) * self._last_step_action[:3] + a * step_action[:3]
-                        step_action = sm
-                    else:
-                        step_action = (1 - a) * self._last_step_action + a * step_action
+                    sm = step_action.copy()
+
+                    # 平滑 left/right 的 tcp 6d（0:6 和 8:14），不动 gripper 宽度等剩余维度
+                    sm[0:6]   = (1 - a) * self._last_step_action[0:6]   + a * step_action[0:6]
+                    sm[8:14]  = (1 - a) * self._last_step_action[8:14]  + a * step_action[8:14]
+
+                    step_action = sm
                     self._last_step_action = step_action.copy()
 
+
+        
             with self._phase_lock:
                 phase_id = self._latest_phase_id
 
@@ -563,7 +782,7 @@ class RealRunner:
                 step_action,
                 use_relative_action=False,
                 is_bimanual=is_bimanual,
-                phase_id=phase_id
+                phase_id=phase_id,
             )
 
 
@@ -613,10 +832,10 @@ class RealRunner:
                 ww = np.asarray(w, dtype=np.float32).reshape(-1)[:6]
                 self._wrench_dense_buf.append(ww)
 
-                # ---- NEW: log Fz at control_fps (ONLY keep this, remove inference logging) ----
+                # ---- Fz log at control_fps ----
                 self._fz_dense_t.append(time.time())
                 self._fz_dense_step.append(int(self._fz_dense_ctr))
-                self._fz_dense.append(float(ww[2]))
+                self._fz_dense.append(float(ww[2]))  # index 2 => Fz
                 self._fz_dense_ctr += 1
 
 
@@ -707,14 +926,13 @@ class RealRunner:
                     continue
 
                 logger.info("Start episode rollout.")
-            
+                
+
                 self.env.reset()
                 time.sleep(1)
 
                 policy.reset()
 
-                with self._phase_lock:
-                    self._latest_phase_id = None
                 with self.tcp_buf_lock:
                     self.tcp_ensemble_buffer.clear()
                 with self.grip_buf_lock:
@@ -724,6 +942,12 @@ class RealRunner:
                 self._last_step_action = None
                 self._last_tcp_step_action = None
                 self._last_gripper_step_action = None
+
+                if self.enable_fast and (self._fast is not None):
+                    self._fast.reset()
+                    self._fast_paep_p_contact = None
+                    self._fast_paep_p_phase = None
+
 
                 if self.enable_video_recording:
                     video_path = os.path.join(self.video_dir, f"episode_{episode_idx}.mp4")
@@ -735,11 +959,12 @@ class RealRunner:
 
                 # ---- start 24Hz wrench polling thread (for dense wrench_hist) ----
                 self._start_dense_wrench_polling()
-
+                
                 self._fz_dense.clear()
                 self._fz_dense_t.clear()
                 self._fz_dense_step.clear()
                 self._fz_dense_ctr = 0
+
 
 
                 time.sleep(0.5)
@@ -777,6 +1002,7 @@ class RealRunner:
                         #                 f"min={x.min()} max={x.max()} mean={x.mean():.4f}"
                         #             )
 
+                    
 
                         np_obs_dict = get_real_obs_dict(env_obs=np_obs_dict, shape_meta=self.shape_meta)
 
@@ -819,15 +1045,6 @@ class RealRunner:
                                 action_dict = policy.predict_action(obs_dict)
 
                         np_action_dict = dict_apply(action_dict, lambda x: x.detach().to("cpu").numpy())
-                        
-                        if "paep_phase_id" in np_action_dict:
-                            phase_id = int(np.array(np_action_dict["paep_phase_id"]).reshape(-1)[0])
-                        else:
-                            phase_id = None
-
-                        with self._phase_lock:
-                            self._latest_phase_id = phase_id
-                            #self._latest_phase_id = None #不想传phaseid就用这行
 
                         # # ---- DBG: how much force residual is injected into vision ----
                         # if (infer_step % 1) == 0:
@@ -936,51 +1153,67 @@ class RealRunner:
                         #                     except Exception:
                         #                         pass
 
-                        #     except Exception as e:
-                        #         logger.warning(f"[DBG][FUSION] failed to read fusion debug: {e}")
-                        #         try:
-                        #             self.paep_logger.info(f"[DBG][FUSION] failed to read fusion debug: {e}")
-                        #             for h in self.paep_logger.handlers:
-                        #                 try:
-                        #                     h.flush()
-                        #                 except Exception:
-                        #                     pass
-                        #         except Exception:
-                        #             pass
+                            # except Exception as e:
+                            #     logger.warning(f"[DBG][FUSION] failed to read fusion debug: {e}")
+                            #     try:
+                            #         self.paep_logger.info(f"[DBG][FUSION] failed to read fusion debug: {e}")
+                            #         for h in self.paep_logger.handlers:
+                            #             try:
+                            #                 h.flush()
+                            #             except Exception:
+                            #                 pass
+                            #     except Exception:
+                            #         pass
 
 
-                        # # --- PAEP phase logging (policy v4) ---
-                        # if "paep_phase_id" in np_action_dict:
-                        #     phase_id = int(np.array(np_action_dict["paep_phase_id"]).reshape(-1)[0])
 
-                        #     conf = float("nan")
-                        #     if "paep_phase_conf" in np_action_dict:
-                        #         conf = float(np.array(np_action_dict["paep_phase_conf"]).reshape(-1)[0])
+                        # --- PAEP phase logging (policy v4) ---
+                        if "paep_phase_id" in np_action_dict:
+                            phase_id = int(np.array(np_action_dict["paep_phase_id"]).reshape(-1)[0])
+                            
+                            with self._phase_lock:
+                                self._latest_phase_id = phase_id
 
-                        #     g = float("nan")
-                        #     if "paep_g_contact" in np_action_dict:
-                        #         g = float(np.array(np_action_dict["paep_g_contact"]).reshape(-1)[0])
+                            conf = float("nan")
+                            if "paep_phase_conf" in np_action_dict:
+                                conf = float(np.array(np_action_dict["paep_phase_conf"]).reshape(-1)[0])
 
-                        #     pc = float("nan")
-                        #     if "paep_p_contact" in np_action_dict:
-                        #         pc = float(np.array(np_action_dict["paep_p_contact"]).reshape(-1)[0])
+                            g = float("nan")
+                            if "paep_g_contact" in np_action_dict:
+                                g = float(np.array(np_action_dict["paep_g_contact"]).reshape(-1)[0])
 
-                        #     if (infer_step % 10) == 0 and "paep_p_phase" in np_action_dict:
-                        #         p = np_action_dict["paep_p_phase"].reshape(-1, 3)[0]
-                        #         fz = (self._fz_dense[-1] if len(self._fz_dense) > 0 else None)
-                        #         fz_str = "nan" if fz is None else f"{fz:.3f}"
-                        #         msg = (
-                        #             f"infer_step={infer_step} step={step_count} fz={fz_str} "
-                        #             f"p_phase={p.tolist()} phase_id={phase_id} conf={conf:.3f} "
-                        #             f"p_contact={pc:.3f} g={g:.3f}"
-                        #         )
-                        #         logger.info("[PAEP] " + msg)
-                        #         self.paep_logger.info(msg)
-                        #         for h in self.paep_logger.handlers:
-                        #             try:
-                        #                 h.flush()
-                        #             except Exception:
-                        #                 pass
+                            # ---- contact prob (cache for fast) ----
+                            pc = float("nan")
+                            if "paep_p_contact" in np_action_dict:
+                                pc = float(np.array(np_action_dict["paep_p_contact"]).reshape(-1)[0])
+                                if getattr(self, "enable_fast", False):
+                                    self._fast_paep_p_contact = pc
+
+                            # ---- phase prob vector (cache for fast, every infer step) ----
+                            p = None
+                            if "paep_p_phase" in np_action_dict:
+                                p = np.array(np_action_dict["paep_p_phase"]).reshape(-1, 3)[0].astype(np.float32)
+                                if getattr(self, "enable_fast", False):
+                                    self._fast_paep_p_phase = p
+
+                            # # ---- log (keep 10-step frequency) ----
+                            # if (infer_step % 10) == 0 and (p is not None):
+                            #     fz_str = "nan" if fz is None else f"{fz:.3f}"
+                            #     msg = (
+                            #         f"infer_step={infer_step} step={step_count} fz={fz_str} "
+                            #         f"p_phase={p.tolist()} phase_id={phase_id} conf={conf:.3f} "
+                            #         f"p_contact={pc:.3f} g={g:.3f}"
+                            #     )
+                            #     logger.info("[PAEP] " + msg)
+                            #     self.paep_logger.info(msg)
+                            #     for h in self.paep_logger.handlers:
+                            #         try:
+                            #             h.flush()
+                            #         except Exception:
+                            #             pass
+
+                            
+
 
                         action_all = np_action_dict["action"].squeeze(0)
 
@@ -1132,6 +1365,7 @@ class RealRunner:
                     # ---- stop 24Hz wrench polling thread ----
                     self._stop_dense_wrench_polling()
 
+
                     csv_path = osp.join(self._fz_run_dir, f"episode_{episode_idx:03d}_left_tcp_fz.csv")
                     meta_path = osp.join(self._fz_run_dir, f"episode_{episode_idx:03d}_left_tcp_fz_meta.json")
                     npy_path = osp.join(self._fz_run_dir, f"episode_{episode_idx:03d}_left_tcp_fz.npy")
@@ -1144,7 +1378,6 @@ class RealRunner:
                         for t, s, z in zip(self._fz_dense_t, self._fz_dense_step, self._fz_dense):
                             w.writerow([t, s, z])
 
-                    # （可选）你原来 meta 里还有 episode_success，就继续保留
                     meta = {
                         "policy": self.policy_name,
                         "run_timestamp": self._fz_run_ts,
@@ -1160,6 +1393,19 @@ class RealRunner:
                         json.dump(meta, f, indent=2)
 
                     logger.info(f"[FZ] saved(control_fps): {csv_path} (+ npy/meta)")
+
+
+
+                    # ---- ask user to label episode success/failure (for later grouping cos stats) ----
+                    try:
+                        episode_success = py_cli_interaction.parse_cli_bool(
+                            "Was this episode successful? (y/n)",
+                            default_value=True
+                        )
+                    except Exception:
+                        episode_success = None
+
+                
 
                     action_thread.join()
 

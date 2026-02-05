@@ -228,6 +228,16 @@ class RealRunner:
 
         self.stop_event = threading.Event()
         self.session = requests.Session()
+         
+        # --- control-fps Fz polling (ONLY log at control_fps) ---
+        self._fz_dense = []
+        self._fz_dense_t = []
+        self._fz_dense_step = []
+        self._fz_dense_ctr = 0
+        self._fz_stop = threading.Event()
+        self._fz_thread = None
+
+
 
     @staticmethod
     def spin_executor(executor):
@@ -460,6 +470,85 @@ class RealRunner:
             else:
                 logger.error(f"Failed to stop recording video")
 
+
+    def _fz_poll_thread(self):
+        """
+        以 control_fps 轮询 Fz（优先读 env.latest_left_robot_tcp_wrench；失败再 get_obs(1) 兜底）。
+        只写内存，不做磁盘 I/O。
+        """
+        dt = self.control_interval_time
+        self._fz_stop.clear()
+        last_w = None
+
+        while not self._fz_stop.is_set():
+            t0 = time.time()
+            w = None
+
+            # 1) 优先读 env 缓存
+            try:
+                if hasattr(self.env, "mutex"):
+                    with self.env.mutex:
+                        w = getattr(self.env, "latest_left_robot_tcp_wrench", None)
+                else:
+                    w = getattr(self.env, "latest_left_robot_tcp_wrench", None)
+            except Exception:
+                w = None
+
+            # 2) fallback：读一次 obs(1)
+            if w is None:
+                try:
+                    obs1 = self.env.get_obs(obs_steps=1, temporal_downsample_ratio=1)
+                    if len(obs1) > 0:
+                        np_obs1 = dict(obs1)
+                        fz = _extract_fz_from_obs(np_obs1)
+                        if fz is not None:
+                            self._fz_dense_t.append(time.time())
+                            self._fz_dense_step.append(int(self._fz_dense_ctr))
+                            self._fz_dense.append(float(fz))
+                            self._fz_dense_ctr += 1
+                            precise_sleep(max(0.0, dt - (time.time() - t0)))
+                            continue
+                except Exception:
+                    pass
+
+            # 3) 用缓存 w 算 Fz
+            if w is None:
+                w = last_w
+            else:
+                last_w = w
+
+            if w is not None:
+                ww = np.asarray(w, dtype=np.float32).reshape(-1)[:6]
+                self._fz_dense_t.append(time.time())
+                self._fz_dense_step.append(int(self._fz_dense_ctr))
+                self._fz_dense.append(float(ww[2]))
+                self._fz_dense_ctr += 1
+
+            precise_sleep(max(0.0, dt - (time.time() - t0)))
+
+
+    def _start_fz_polling(self):
+        self._fz_dense.clear()
+        self._fz_dense_t.clear()
+        self._fz_dense_step.clear()
+        self._fz_dense_ctr = 0
+        self._fz_stop.clear()
+        self._fz_thread = threading.Thread(target=self._fz_poll_thread, daemon=True)
+        self._fz_thread.start()
+
+
+    def _stop_fz_polling(self):
+        if self._fz_thread is None:
+            return
+        self._fz_stop.set()
+        try:
+            self._fz_thread.join(timeout=1.0)
+        except Exception:
+            pass
+        self._fz_thread = None
+
+
+
     def run(self, policy: Union[DiffusionUnetImagePolicy]):
         if self.use_latent_action_with_rnn_decoder:
             assert policy.at.use_rnn_decoder, "Policy should use rnn decoder for latent action."
@@ -499,11 +588,6 @@ class RealRunner:
                 # set gripper to max width 新增：策略开始前不张开夹爪
                 #self.env.send_gripper_command_direct(self.env.max_gripper_width, self.env.max_gripper_width)
 
-                fz_log = []
-                fz_step_log = []
-
-                csv_path, csv_f, csv_w = _open_fz_csv(self._fz_run_dir, episode_idx)
-                meta_path = osp.join(self._fz_run_dir, f"episode_{episode_idx:03d}_left_tcp_fz_meta.json")
                 time.sleep(1)
 
                 policy.reset()
@@ -517,6 +601,7 @@ class RealRunner:
                     logger.info(f"Start recording video to {video_path}")
 
                 self.stop_event.clear()
+                self._start_fz_polling()
                 time.sleep(0.5)
                 # start a new thread for action command
                 action_thread = threading.Thread(target=self.action_command_thread, args=(policy, self.stop_event,),
@@ -551,18 +636,6 @@ class RealRunner:
                         # create obs dict
                         np_obs_dict = dict(obs)
                         
-                        # ================= 修复开始 =================
-                        # 1. 先从原始数据中提取 Fz (防止被 get_real_obs_dict 过滤掉)
-                        fz = _extract_fz_from_obs(np_obs_dict)
-                        if fz is not None:
-                            fz_log.append(fz)
-                            fz_step_log.append(step_count)
-                            csv_w.writerow([time.time(), step_count, fz])
-                        else:
-                            # 可选：打印一次警告，确认是不是 key 名字对不上
-                            if step_count == 0:
-                                logger.warning(f"Warning: No wrench key found in obs. Available keys: {list(np_obs_dict.keys())}")
-                        # ================= 修复结束 =================
 
                         # get transformed real obs dict
                         np_obs_dict = get_real_obs_dict(
@@ -681,29 +754,36 @@ class RealRunner:
                     logger.warning("KeyboardInterrupt! Terminate the episode now!")
                 finally:
                     self.stop_event.set()
-                    
-                    #统一落盘 npy + meta + 关文件
-                    try:
-                        csv_f.flush()
-                        csv_f.close()
-                    except Exception:
-                        pass
-
+                    self._stop_fz_polling()
+                    csv_path = osp.join(self._fz_run_dir, f"episode_{episode_idx:03d}_left_tcp_fz.csv")
+                    meta_path = osp.join(self._fz_run_dir, f"episode_{episode_idx:03d}_left_tcp_fz_meta.json")
                     npy_path = osp.join(self._fz_run_dir, f"episode_{episode_idx:03d}_left_tcp_fz.npy")
-                    np.save(npy_path, np.asarray(fz_log, dtype=np.float32))
 
+                    # save npy
+                    np.save(npy_path, np.asarray(self._fz_dense, dtype=np.float32))
+
+                    # save csv
+                    with open(csv_path, "w", newline="") as f:
+                        w = csv.writer(f)
+                        w.writerow(["wall_time", "control_step", "fz"])
+                        for t, s, z in zip(self._fz_dense_t, self._fz_dense_step, self._fz_dense):
+                            w.writerow([t, s, z])
+
+                    # meta
                     with open(meta_path, "w") as f:
                         json.dump({
                             "policy": self.policy_name,
                             "run_timestamp": self._fz_run_ts,
                             "episode_idx": episode_idx,
+                            "control_fps": self.control_fps,
                             "csv_path": csv_path,
                             "npy_path": npy_path,
-                            "step": fz_step_log,
-                            "n": len(fz_log),
-                            "source_key": "left_robot_tcp_wrench (or compatible) index 2 => Fz",
+                            "step": self._fz_dense_step,
+                            "n": len(self._fz_dense),
+                            "source": "control-fps polling; Fz = tcp_wrench[2] (left_robot_tcp_wrench or env.latest_left_robot_tcp_wrench)",
                         }, f, indent=2)
-                    logger.info(f"[FZ] saved: {csv_path} (+ npy/meta)")
+
+                    logger.info(f"[FZ] saved(control_fps): {csv_path} (+ npy/meta)")
 
                     action_thread.join()
                     if self.enable_video_recording:

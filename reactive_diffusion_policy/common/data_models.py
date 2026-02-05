@@ -49,8 +49,11 @@ class MoveGripperRequest(BaseModel):
     velocity: float = 10.0
     force_limit: float = 5.0
 
+from pydantic import BaseModel
+from typing import List, Optional
 class TargetTCPRequest(BaseModel):
     target_tcp: List[float]  # (7) (x, y, z, qw, qx, qy, qz)
+    phase_id: Optional[int] = None   # ✅ 新增：可选，向后兼容
 
 class ActionPrimitiveRequest(BaseModel):
     primitive_cmd: str
@@ -127,6 +130,7 @@ class SensorMode(Enum):
     single_arm_two_realsense_no_tactile = auto()
     single_arm_two_realsense_two_tactile = auto()
     dual_arm_two_realsense_four_tactile = auto()
+    single_arm_three_realsense_two_tactile = auto()
 
 class TeleopMode(Enum):
     left_arm_6DOF = auto()

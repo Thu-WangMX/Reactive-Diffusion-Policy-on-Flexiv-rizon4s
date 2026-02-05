@@ -157,33 +157,50 @@ class FastResidualPolicy(nn.Module):
         return y, aux
 
 
-def loss_fast(delta_pred: torch.Tensor,
-              delta_gt: torch.Tensor,
-              sample_weight: torch.Tensor,
-              w_dp: float = 1.0,
-              w_rot: float = 0.0,
-              base_weight: float = 0.1,
-              active_boost: float = 1.0):
+import torch
+import torch.nn.functional as F
+
+def loss_fast(pred9, target9, w_soft=None, hard_mask=None, fz_err=None, lambda_rule: float = 0.5):
     """
-    Weighted L1 loss:
-      sample_weight in [0,1] from PAEP soft active prob.
-      final weight = base_weight + active_boost * sample_weight
+    pred9:   (B,9)
+    target9: (B,9)
+    fz_err:  (B,) raw error = fz - fz_target
+            >0 => force too small => should PRESS_DOWN => dz_ee should be positive
+            <0 => force too large => should LIFT_UP   => dz_ee should be negative
     """
-    assert delta_pred.shape == delta_gt.shape and delta_pred.shape[-1] == 9
-    w = (base_weight + active_boost * sample_weight).view(-1, 1)  # (B,1)
+    B = pred9.shape[0]
+    if w_soft is None:
+        w_soft = pred9.new_ones((B,))
+    else:
+        w_soft = w_soft.reshape(-1).to(pred9.device)
 
-    dp = torch.abs(delta_pred[:, :3] - delta_gt[:, :3]).mean(dim=1, keepdim=True)   # (B,1)
-    rot = torch.abs(delta_pred[:, 3:9] - delta_gt[:, 3:9]).mean(dim=1, keepdim=True)
+    if hard_mask is None:
+        hard_mask = pred9.new_ones((B,))
+    else:
+        hard_mask = hard_mask.reshape(-1).to(pred9.device)
 
-    l_dp = (w * dp).mean()
-    l_rot = (w * rot).mean()
+    # ---- main regression loss ----
+    l1 = (pred9 - target9).abs().mean(dim=1)              # (B,)
+    loss_reg = (l1 * w_soft * hard_mask).sum() / (hard_mask.sum() + 1e-6)
 
-    loss = w_dp * l_dp + w_rot * l_rot
+    # ---- ✅ iron-law directional loss on dz (EE frame) ----
+    loss_rule = pred9.new_tensor(0.0)
+    if (fz_err is not None) and (lambda_rule is not None) and (float(lambda_rule) > 0):
+        e = fz_err.reshape(-1).to(pred9.device)           # (B,)
+        s = torch.sign(e)                                 # desired sign of dz
+        valid = (hard_mask > 0.5) & (s.abs() > 0)         # ignore near-zero deadband
 
-    log = {
-        "l_dp": float(l_dp.detach().cpu()),
-        "l_rot": float(l_rot.detach().cpu()),
-        "w_mean": float(w.mean().detach().cpu()),
-        "w_max": float(w.max().detach().cpu()),
+        dz = pred9[:, 2]                                  # dz in EE frame
+        # want dz * s >= 0; penalize opposite direction
+        # hinge: relu(-(dz*s))
+        viol = F.relu(-(dz * s))
+        if valid.any():
+            loss_rule = viol[valid].mean()
+
+    loss = loss_reg + float(lambda_rule) * loss_rule
+    stats = {
+        "loss_reg": float(loss_reg.detach().cpu()),
+        "loss_rule": float(loss_rule.detach().cpu()),
     }
-    return loss, log
+    return loss, stats
+

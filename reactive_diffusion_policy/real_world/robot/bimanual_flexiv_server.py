@@ -178,6 +178,7 @@ class BimanualFlexivServer():
 
             robot_gripper = self.left_robot.gripper if robot_side == 'left' else self.right_robot.gripper
             robot_gripper.Move(request.width, request.velocity, request.force_limit)
+            #print("request.width",request.width)
             return {
                 "message": f"{robot_side.capitalize()} gripper moving to width {request.width} "
                            f"with velocity {request.velocity} and force limit {request.force_limit}"}
@@ -219,10 +220,10 @@ class BimanualFlexivServer():
             
             robot = self.left_robot if robot_side == 'left' else self.right_robot
             #print("equest.target_tcp",request.target_tcp)
-            robot.tcp_move(request.target_tcp)
-            #print("jiedaolejjjjjjjjjjjjjjjjj")
-            # logger.debug(f"{robot_side.capitalize()} robot moving to target tcp {request.target_tcp}")
-            return {"message": f"{robot_side.capitalize()} robot moving to target tcp {request.target_tcp}"}
+            phase_id = getattr(request, "phase_id", None)
+            robot.tcp_move(request.target_tcp, phase_id=phase_id)
+            return {"message": f"{robot_side.capitalize()} robot moving to target tcp {request.target_tcp}, phase_id={phase_id}"}
+
 
         @self.app.post('/execute_primitive/{robot_side}')
         async def execute_primitive(robot_side: str, request: ActionPrimitiveRequest) -> Dict[str, str]:

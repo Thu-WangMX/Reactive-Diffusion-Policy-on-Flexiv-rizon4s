@@ -7,8 +7,7 @@ import numpy as np
 sys.path.append('/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s')
 
 # 2. 指定你的文件路径
-file_path = '/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/dataset_pkl/wiping_board/seq_00016.pkl'
-
+file_path = "/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/dataset_pkl/plug_in_charger/seq_00017.pkl"
 def inspect_deep(data, name="Root", indent=0, max_depth=5):
     prefix = "  " * indent
     if indent > max_depth:

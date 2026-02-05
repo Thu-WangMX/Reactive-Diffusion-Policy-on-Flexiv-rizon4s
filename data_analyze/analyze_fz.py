@@ -1,186 +1,211 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import csv
 import os
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
 from pathlib import Path
-from scipy.ndimage import label, binary_closing
+import numpy as np
 
 # ================= 配置区域 =================
-LOG_ROOT = Path("/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/video/fz_logs")
+PARENT_DIRS = [
+    "/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/video/fz_logs_wiping_board_ID",
+    "/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/video/fz_logs_wiping_board_OOD"
+]
 
-EXPERIMENTS = {
-    # 请确认这里的路径是你刚才录制成功的那个文件夹
-    "Baseline (Image DP)": LOG_ROOT / "wmx_real_image_dp_absolute_12fps/20260123_183409",
-    # "PAEP-Gated": LOG_ROOT / "..." 
-}
+# 1. 阶段判定参数
+CONTACT_THR = 3.0       # 接触判定阈值
+START_CONSEC = 10       # 开始：连续 10 帧 > 3.0N
+END_CONSEC = 20         # 结束：连续 20 帧 < 3.0N
 
-CONTACT_THRESHOLD = 2.0
-MAX_GAP_TOLERANCE = 1.0 
-MIN_ACTION_DURATION = 2.0 
-
-plt.style.use('seaborn-v0_8-whitegrid')
-plt.rcParams['font.sans-serif'] = ['SimHei', 'DejaVu Sans']
-plt.rcParams['axes.unicode_minus'] = False
+# 2. 质量统计阈值
+OVER_THR = 25.0         # 过压阈值 > 25N
+UNDER_THR = 3.0         # 欠压阈值 < 3N (在接触段内)
 # ===========================================
 
-def get_fps_from_name(path_str):
-    if "24fps" in path_str: return 24.0
-    if "12fps" in path_str: return 12.0
-    return 10.0
+def read_fz_from_csv(csv_path: Path) -> np.ndarray:
+    try:
+        with open(csv_path, "r", newline="") as f:
+            reader = csv.reader(f)
+            rows = list(reader)
+    except Exception:
+        return np.array([], dtype=np.float64)
 
-def load_data(exp_path):
-    path = Path(exp_path)
-    csv_files = sorted(list(path.glob("*fz.csv")))
-    npy_files = sorted(list(path.glob("*fz.npy")))
-    
-    data = None
-    if csv_files:
-        try:
-            # 自动识别 header
-            df = pd.read_csv(csv_files[0])
-            # 统一列名小写
-            df.columns = [str(c).lower().strip() for c in df.columns]
-            
-            if 'fz' in df.columns:
-                data = df['fz'].values
-            elif len(df.columns) >= 3:
-                # 备用：取第3列
-                data = df.iloc[:, 2].values
-            else:
-                print(f"[Error] 无法识别 Fz 列: {csv_files[0]}")
-                return None, 0.0
+    if not rows:
+        return np.array([], dtype=np.float64)
 
-            # 确保转为 float，遇到非数字变成 NaN 然后丢弃
-            data = pd.to_numeric(data, errors='coerce')
-            data = data[~np.isnan(data)]
-
-        except Exception as e:
-            print(f"Error loading CSV {csv_files[0]}: {e}")
-            return None, 0.0
-            
-    elif npy_files:
-        data = np.load(npy_files[0]).flatten()
+    header = rows[0]
+    has_header = any(isinstance(x, str) and ("fz" in x.lower()) for x in header)
+    fz_list = []
     
-    if data is None or len(data) == 0:
-        return None, 0.0
-    return data, get_fps_from_name(str(exp_path))
-
-def find_main_wiping_segment(force_array, fps):
-    is_contact_raw = np.abs(force_array) > CONTACT_THRESHOLD
-    gap_pixels = int(MAX_GAP_TOLERANCE * fps)
-    structure = np.ones(gap_pixels)
-    is_contact_closed = binary_closing(is_contact_raw, structure=structure)
-    labeled, n_components = label(is_contact_closed)
-    
-    best_segment = None
-    max_duration = 0
-    
-    for i in range(1, n_components + 1):
-        idxs = np.where(labeled == i)[0]
-        if len(idxs) == 0: continue
-        start, end = idxs[0], idxs[-1]
-        duration = (end - start) / fps
-        if duration > MIN_ACTION_DURATION:
-            if duration > max_duration:
-                max_duration = duration
-                best_segment = (start, end)
-    return best_segment
-
-def calculate_metrics(force_array, fps, name):
-    abs_force = np.abs(force_array)
-    segment = find_main_wiping_segment(force_array, fps)
-    metrics = {"Name": name}
-    
-    if segment is None:
-        print(f"[{name}] 未检测到有效擦拭阶段")
-        metrics.update({"Mean Force (N)": 0, "Max Force (N)": 0, "Contact Ratio (%)": 0, "Avg Recovery Time (s)": 0})
-        return metrics, np.array([]), np.array([])
-    
-    start_idx, end_idx = segment
-    margin = int(0.2 * fps) 
-    if end_idx - start_idx > 2 * margin:
-        start_idx += margin; end_idx -= margin
-
-    roi_force_abs = abs_force[start_idx:end_idx]
-    roi_force_raw = force_array[start_idx:end_idx]
-    roi_time = np.arange(start_idx, end_idx) / fps
-    roi_time = roi_time - roi_time[0]
-    
-    is_contact_roi = roi_force_abs > CONTACT_THRESHOLD
-    
-    if np.any(is_contact_roi):
-        contact_forces = roi_force_abs[is_contact_roi]
-        metrics["Mean Force (N)"] = np.mean(contact_forces)
-        metrics["Max Force (N)"] = np.max(contact_forces)
-        metrics["Force Std Dev (N)"] = np.std(contact_forces)
+    if has_header:
+        fz_idx = len(header) - 1
+        for i, name in enumerate(header):
+            if isinstance(name, str) and ("fz" in name.lower() or "force_z" in name.lower()):
+                fz_idx = i
+                break
+        for r in rows[1:]:
+            if len(r) > fz_idx:
+                try: fz_list.append(float(r[fz_idx]))
+                except: continue
     else:
-        metrics.update({"Mean Force (N)": 0, "Max Force (N)": 0, "Force Std Dev (N)": 0})
-        
-    metrics["Contact Ratio (%)"] = (np.sum(is_contact_roi) / len(roi_force_abs)) * 100
-    
-    structure = np.ones(3, dtype=int)
-    labeled_loss, n_loss = label(is_contact_roi == 0, structure)
-    loss_durations = [np.sum(labeled_loss == i)/fps for i in range(1, n_loss + 1) if (np.sum(labeled_loss == i)/fps > 0.05)]
-    metrics["Avg Recovery Time (s)"] = np.mean(loss_durations) if loss_durations else 0.0
+        for r in rows:
+            if r:
+                try: fz_list.append(float(r[-1]))
+                except: continue
 
-    return metrics, roi_time, roi_force_raw
+    return np.asarray(fz_list, dtype=np.float64)
+
+def find_wipe_segment(F: np.ndarray, threshold: float, start_persist: int, end_persist: int):
+    """
+    定位有效擦拭段 [start, end)
+    """
+    n = len(F)
+    start_idx = -1
+    end_idx = -1
+
+    # 1. 寻找开始
+    for i in range(n - start_persist):
+        if F[i] > threshold and F[i + start_persist - 1] > threshold:
+            if np.all(F[i : i + start_persist] > threshold):
+                start_idx = i
+                break
+    
+    if start_idx == -1: return None, None
+
+    # 2. 寻找结束
+    search_start = start_idx + start_persist
+    end_idx = n 
+
+    for i in range(search_start, n - end_persist):
+        if F[i] < threshold and F[i + end_persist - 1] < threshold:
+            if np.all(F[i : i + end_persist] < threshold):
+                end_idx = i
+                break
+    
+    return start_idx, end_idx
+
+def get_folder_stats(folder_path: Path) -> dict:
+    """
+    计算整个文件夹的汇总统计信息
+    """
+    csv_files = sorted(folder_path.rglob("*_left_tcp_fz.csv"))
+    
+    episode_means = []
+    episode_maxs = []
+    episode_mins = []  # 新增：记录每个episode的最小值
+    episode_over_ratios = []
+    episode_under_ratios = [] # 新增：记录每个episode的欠压率
+    
+    eof_interrupted_count = 0
+
+    for fp in csv_files:
+        fz = read_fz_from_csv(fp)
+        if fz.size == 0: continue
+
+        F = -fz # 转为正压力
+
+        s_idx, e_idx = find_wipe_segment(F, CONTACT_THR, START_CONSEC, END_CONSEC)
+
+        if s_idx is None:
+            continue
+        
+        # 提取有效段
+        wipe_force = F[s_idx : e_idx]
+        
+        # 记录指标
+        episode_means.append(np.mean(wipe_force))
+        episode_maxs.append(np.max(wipe_force))
+        episode_mins.append(np.min(wipe_force)) # 记录最小值
+        
+        over_r = np.sum(wipe_force > OVER_THR) / len(wipe_force)
+        under_r = np.sum(wipe_force < UNDER_THR) / len(wipe_force)
+        
+        episode_over_ratios.append(over_r)
+        episode_under_ratios.append(under_r)
+
+        if e_idx >= len(F):
+            eof_interrupted_count += 1
+
+    valid_count = len(episode_means)
+    
+    if valid_count == 0:
+        return None
+
+    return {
+        "name": folder_path.name,
+        "valid_episodes": valid_count,
+        "total_files": len(csv_files),
+        
+        "agg_mean_force": np.mean(episode_means),
+        "agg_std_force": np.std(episode_means),
+        
+        "global_max_force": np.max(episode_maxs),
+        "global_min_force": np.min(episode_mins), # 整个文件夹出现的最低接触力
+        
+        "agg_over_ratio": np.mean(episode_over_ratios),
+        "agg_under_ratio": np.mean(episode_under_ratios), # 平均欠压率
+        
+        "interrupted_count": eof_interrupted_count
+    }
 
 def main():
-    print("=== 开始分析 Fz 数据 (V4 Fix) ===")
-    results = []
-    plot_data = []
+    # 增加总宽度以容纳长名字
+    LINE_WIDTH = 145 
     
-    for name, path in EXPERIMENTS.items():
-        if not path.exists():
-            print(f"Path not found: {path}")
-            continue   
-        raw_data, fps = load_data(path)
-        if raw_data is None: continue
+    print("=" * LINE_WIDTH)
+    print(f"AGGREGATED WIPE STATISTICS (FULL)")
+    print(f"Criteria: Start > {CONTACT_THR}N | End < {CONTACT_THR}N | Under < {UNDER_THR}N | Over > {OVER_THR}N")
+    print("=" * LINE_WIDTH)
+    
+    # 修改1：将第一列宽度从 50 增加到 60
+    header = f"{'Policy Name':<60} | {'N_Ep':<5} | {'Mean F':<8} | {'Max F':<8} | {'Min F':<8} | {'Over%':<7} | {'Under%':<7} | {'Std Dev':<7}"
+    print(header)
+    print("-" * LINE_WIDTH)
+
+    for parent in PARENT_DIRS:
+        parent_path = Path(parent)
+        if not parent_path.exists(): continue
+
+        print(f"\n>>>> GROUP: {parent_path.name}")
+        print("-" * LINE_WIDTH)
+
+        subdirs = sorted([d for d in parent_path.iterdir() if d.is_dir()])
         
-        metrics, t, f = calculate_metrics(raw_data, fps, name)
-        results.append(metrics)
-        if len(t) > 0:
-            plot_data.append({"name": name, "time": t, "force": f})
+        for sub in subdirs:
+            stats = get_folder_stats(sub)
+            
+            if stats is None:
+                # 修改2：同步调整这里的第一列宽度为 60
+                print(f"{sub.name:<60} | {'0':<5} | {'N/A':<8} | {'N/A':<8} | {'N/A':<8} | {'N/A':<7} | {'N/A':<7} | {'N/A':<7}")
+                continue
+            
+            # 修改3：去掉 [:48] 的截断，完全显示名字
+            name_str = stats['name'] 
+            
+            # 格式化数据
+            n_ep_str = f"{stats['valid_episodes']}"
+            mean_str = f"{stats['agg_mean_force']:.2f}N"
+            max_str  = f"{stats['global_max_force']:.2f}N"
+            min_str  = f"{stats['global_min_force']:.2f}N"
+            over_str = f"{stats['agg_over_ratio']*100:.1f}%"
+            under_str= f"{stats['agg_under_ratio']*100:.1f}%"
+            std_str  = f"{stats['agg_std_force']:.2f}"
+            
+            warning = ""
+            if stats['global_max_force'] > 60.0 or stats['agg_over_ratio'] > 0.3:
+                warning = " << DANGER"
+            elif stats['agg_under_ratio'] > 0.3:
+                warning = " << POOR CONTACT"
+            
+            # 修改4：同步调整这里的第一列宽度为 60
+            row = f"{name_str:<60} | {n_ep_str:<5} | {mean_str:<8} | {max_str:<8} | {min_str:<8} | {over_str:<7} | {under_str:<7} | {std_str:<7}{warning}"
+            print(row)
 
-    if not results:
-        print("无有效数据。")
-        return
-
-    df_res = pd.DataFrame(results)
-    cols = ["Name", "Max Force (N)", "Mean Force (N)", "Force Std Dev (N)", "Contact Ratio (%)", "Avg Recovery Time (s)"]
-    print("\n=== 分析结果 ===")
-    print(df_res[cols].to_string(index=False))
-    
-    # 绘图逻辑
-    fig = plt.figure(figsize=(16, 8))
-    gs = fig.add_gridspec(2, 4)
-
-    ax1 = fig.add_subplot(gs[0, :2])
-    for item in plot_data:
-        ax1.plot(item["time"], item["force"], label=item["name"], alpha=0.8)
-    ax1.set_title("Wiping Phase: Force Profile"); ax1.legend(); ax1.grid(True, alpha=0.3)
-
-    ax2 = fig.add_subplot(gs[0, 2])
-    sns.barplot(x="Name", y="Max Force (N)", data=df_res, ax=ax2, palette="Reds")
-    ax2.set_title("Max Force (Risk)"); ax2.set_xlabel(""); ax2.set_xticklabels(ax2.get_xticklabels(), rotation=15)
-
-    ax3 = fig.add_subplot(gs[0, 3])
-    sns.barplot(x="Name", y="Contact Ratio (%)", data=df_res, ax=ax3, palette="Greens")
-    ax3.set_title("Contact Ratio"); ax3.set_xlabel(""); ax3.set_xticklabels(ax3.get_xticklabels(), rotation=15)
-
-    ax4 = fig.add_subplot(gs[1, :])
-    box_data = [np.abs(item["force"])[np.abs(item["force"]) > CONTACT_THRESHOLD] for item in plot_data]
-    box_labels = [item["name"] for item in plot_data]
-    if box_data:
-        ax4.boxplot(box_data, labels=box_labels, patch_artist=True, vert=False)
-        ax4.set_title("Force Distribution during Contact")
-
-    plt.tight_layout()
-    save_path = LOG_ROOT / "wiping_analysis_v4.png"
-    plt.savefig(save_path)
-    print(f"\n图表已保存至: {save_path}")
-    plt.show()
+    print("\n" + "=" * LINE_WIDTH)
+    print("Metrics Legend:")
+    print("  Min F : The lowest force detected during valid contact (checking for loss of contact)")
+    print("  Under%: Average percentage of contact time where Force < 3.0N (too light/floating)")
+    print("  Over% : Average percentage of contact time where Force > 25.0N (too heavy)")
 
 if __name__ == "__main__":
     main()

@@ -50,7 +50,7 @@ class TeleopServer:
                  grasp_force: float=5.0,
                  gripper_velocity: float = 10.0,
                  gripper_control_time_interval:int = 60,
-                 gripper_control_width_precision=0.02,
+                 gripper_control_width_precision=0.005,
                  gripper_never_open: bool = False,
                  # visualization parameters
                  grasp_force_vis_close_threshold: float = 15.0,
