@@ -340,6 +340,17 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
                         del mse
                 accelerator.wait_for_everyone()
                 
+                # # checkpoint
+                # if (self.epoch % cfg.training.checkpoint_every) == 0 and accelerator.is_main_process:
+                #     # unwrap the model to save ckpt
+                #     model_ddp = self.model
+                #     self.model = accelerator.unwrap_model(self.model)
+
+                #     # checkpointing
+                #     if cfg.checkpoint.save_last_ckpt:
+                #         self.save_checkpoint()
+                #     if cfg.checkpoint.save_last_snapshot:
+                #         self.save_snapshot()
                 # checkpoint
                 if (self.epoch % cfg.training.checkpoint_every) == 0 and accelerator.is_main_process:
                     # unwrap the model to save ckpt
@@ -352,8 +363,19 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
                     if cfg.checkpoint.save_last_snapshot:
                         self.save_snapshot()
 
+                    # =========================================================
+                    # [修改] 每 300 epoch 或 最后一轮 强制保存
+                    # =========================================================
+                    # self.epoch 是从 0 开始的 (0 ~ num_epochs-1)
+                    is_last_epoch = (self.epoch == cfg.training.num_epochs - 1)
+                    
+                    if self.epoch % 300 == 0 or is_last_epoch:
+                        periodic_ckpt_path = os.path.join(
+                            self.output_dir, 'checkpoints', f'epoch_{self.epoch:04d}.ckpt'
+                        )
+                        self.save_checkpoint(path=periodic_ckpt_path)
+                        accelerator.print(f"[INFO] Saved periodic checkpoint to {periodic_ckpt_path}")
                         
-
                     # sanitize metric names
                     metric_dict = dict()
                     for key, value in step_log.items():

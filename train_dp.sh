@@ -68,8 +68,8 @@
 set -euo pipefail  # 增强鲁棒性，出错立即终止
 
 # ================= 核心配置区域 (仅改这里) =================
-export CUDA_VISIBLE_DEVICES=0,1,2,3  # 物理显卡ID
-NUM_PROCESSES=4                      # 进程数=显卡数
+export CUDA_VISIBLE_DEVICES=0  # 物理显卡ID
+NUM_PROCESSES=1                      # 进程数=显卡数
 MASTER_PORT=29500                    # 主进程端口，防冲突
 DATASET_PATH="/home/ubuntu/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/dataset/wiping_board_stream_downsample1_zarr"  # 数据集路径
 DP_TASK="wmx_real_wiping_board_image_dp_absolute_12fps"  # 训练任务名

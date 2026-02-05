@@ -374,6 +374,18 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
                     if cfg.checkpoint.save_last_snapshot:
                         self.save_snapshot()
 
+                    # =========================================================
+                    # [修改] 每 100 epoch 或 最后一轮 强制保存
+                    # =========================================================
+                    is_last_epoch = (self.epoch == cfg.training.num_epochs - 1)
+
+                    if self.epoch % 100 == 0 or is_last_epoch:
+                        periodic_ckpt_path = os.path.join(
+                            self.output_dir, 'checkpoints', f'epoch_{self.epoch:04d}.ckpt'
+                        )
+                        self.save_checkpoint(path=periodic_ckpt_path)
+                        accelerator.print(f"[INFO] Saved periodic checkpoint to {periodic_ckpt_path}")
+
                     metric_dict = {k.replace("/", "_"): v for k, v in final_log.items()}
                     topk_ckpt_path = topk_manager.get_ckpt_path(metric_dict)
                     if topk_ckpt_path is not None:
