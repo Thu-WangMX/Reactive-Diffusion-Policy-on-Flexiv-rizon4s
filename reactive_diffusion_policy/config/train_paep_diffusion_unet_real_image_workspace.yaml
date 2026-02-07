@@ -1,8 +1,8 @@
 defaults:
-  - task: wmx_paep_real_wiping_board_image_dp_absolute_24fps
+  - task: wmx_paep_real_plugin_charger_image_dp_absolute_24fps
   - _self_
 
-name: train_paep_diffusion_unet_image_force_v2_0125
+name: train_paep_diffusion_unet_image_force_v4_0207
 #_target_: reactive_diffusion_policy.workspace.train_diffusion_unet_image_workspace.TrainDiffusionUnetImageWorkspace
 _target_: reactive_diffusion_policy.workspace.train_ours_diffusion_unet_image_force_workspace.TrainDiffusionUnetImageWorkspace
 
@@ -27,7 +27,8 @@ policy:
 
   # ---- PAEP-guided vision-force fusion ----
   n_heads: 8
-  force_hist: 48
+  force_hist: 36 #插插头
+  #force_hist: 48 #擦白板
   wrench_hist_key: wrench_hist
   pose_key: left_robot_tcp_pose
   gripper_key: left_robot_gripper_width
@@ -36,7 +37,7 @@ policy:
   #training.save_epoch_ckpt_every: 100
 
   # ---- PAEP checkpoint ----
-  paep_ckpt: /home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/PAEP/paep_future_ckpt/paep_runs_0124/best.pt
+  paep_ckpt: /home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/PAEP/ckpt/paep_plug_in_charger_0205/best.pt
   gmin: 0.0
   freeze_paep: True
 

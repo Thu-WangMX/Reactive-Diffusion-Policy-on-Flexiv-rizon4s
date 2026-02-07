@@ -6,7 +6,7 @@ from pathlib import Path
 
 # ================= 配置区域 (CONFIG) =================
 
-ZARR_PATH = "/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/dataset/wiping_board_stream_downsample1_zarr/replay_buffer.zarr"
+ZARR_PATH = "/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/dataset/plug_in_charger/plug_in_charger_stream_downsample1_zarr/replay_buffer.zarr"
 EPISODE_IDX = 38
 CAMERA_KEY = "external_img"
 #CAMERA_KEY = "left_wrist_img"

@@ -2,13 +2,13 @@ import zarr
 import matplotlib.pyplot as plt
 import numpy as np  # 新增：用于通道转换
 
-zarr_path = "/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/dataset/wiping_board_stream_downsample1_zarr/replay_buffer.zarr/data"
+zarr_path = "/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/dataset/plug_in_charger/plug_in_charger_stream_downsample1_zarr/replay_buffer.zarr/data"
 root = zarr.open(zarr_path, mode="r")
 
 print("Keys:", list(root.array_keys()))
 
 # 取第 k 帧的图像
-k = 0  # 想看第几帧就改这里
+k = 17  # 想看第几帧就改这里
 img = root["external_img"][k]  # shape: (240, 320, 3), uint8
 print("Frame", k, "img shape:", img.shape, "dtype:", img.dtype)
 

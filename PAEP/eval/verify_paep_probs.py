@@ -1,5 +1,4 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
+#读取 .npy 概率 + 从 zarr 读 hard label（paep_phase/paep_contact），算 acc、AUC（粗略）、画直方图/时间曲线/episode 窗口对齐图。
 
 import os, json
 import numpy as np

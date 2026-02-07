@@ -67,7 +67,7 @@ class RealImageTactileDataset(BaseImageDataset):
         smooth_rpy_only: bool = False,
         # wrench history
         add_wrench_hist: bool = True,
-        force_hist: int = 48,
+        force_hist: int = 36,
         wrench_key: str = "left_robot_tcp_wrench",
         wrench_hist_key: str = "wrench_hist",
         wrench_hist_pad_mode: str = "repeat_first",
@@ -364,6 +364,7 @@ class RealImageTactileDataset(BaseImageDataset):
         # --- RGB ---
         for key in self.rgb_keys:
             x = data[key]  # (T,H,W,C)
+            x = x[..., ::-1].copy()
             x = _take_first_k_timeordered(x, To * ratio if To is not None else None, ratio)
             obs_dict[key] = np.moveaxis(x, -1, 1).astype(np.float32) / 255.0
             if key not in self.extended_rgb_keys:

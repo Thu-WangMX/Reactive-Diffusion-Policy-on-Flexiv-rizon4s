@@ -5,7 +5,7 @@ data
 outputs
 data_local
 _wandb
-
+*.zip
 **/.DS_Store
 
 fuse.cfg

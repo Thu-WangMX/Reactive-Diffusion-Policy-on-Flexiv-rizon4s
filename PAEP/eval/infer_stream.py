@@ -1,7 +1,4 @@
-# infer_stream.py
-# No argparse version. Supports BOTH:
-#  - New PAEP: phase(3) + contact(1) heads with forward() -> {"p_phase","p_contact"} or forward_logits()
-#  - Old PAEP: single head logits -> softmax
+#在线流式推理 demo（给你接传感器用）
 
 import numpy as np
 import torch

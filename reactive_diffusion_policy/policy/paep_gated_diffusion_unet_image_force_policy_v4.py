@@ -1,4 +1,3 @@
-# reactive_diffusion_policy/policy/paep_gated_diffusion_unet_image_force_policy_v4.py
 import torch.distributed as dist
 from typing import Dict, Tuple, Optional
 import importlib.util
@@ -17,45 +16,12 @@ from reactive_diffusion_policy.policy.base_image_policy import BaseImagePolicy
 from reactive_diffusion_policy.model.diffusion.conditional_unet1d import ConditionalUnet1D
 from reactive_diffusion_policy.model.diffusion.mask_generator import LowdimMaskGenerator
 from reactive_diffusion_policy.common.pytorch_util import dict_apply
-from reactive_diffusion_policy.model.force.force_encoder import ForceTCNTokenEncoder
+from reactive_diffusion_policy.model.force.tcn_encoder import ForceTCNTokenEncoder
 from reactive_diffusion_policy.model.force.dual_gated_v_f_fusion_v4 import DualGatedVisionForceFusion
+from PAEP.eval.load_paep_net import load_paep_future_net
 
 
-# ----------------------------
-# Robust PAEP import (same spirit as v3)
-# ----------------------------
-
-
-def _load_paep_future_net():
-    repo_root = Path(__file__).resolve().parents[2]
-    paep_dir = repo_root / "PAEP"
-    candidates = [
-        paep_dir / "paep_train" / "paep_model.py",
-        paep_dir / "paep_model.py",
-        paep_dir / "models" / "paep_model.py",
-    ]
-    if paep_dir.exists():
-        for p in paep_dir.rglob("paep_model.py"):
-            candidates.append(p)
-
-    for p in candidates:
-        if not p.exists():
-            continue
-        try:
-            spec = importlib.util.spec_from_file_location("paep_dyn", str(p))
-            mod = importlib.util.module_from_spec(spec)
-            assert spec and spec.loader
-            spec.loader.exec_module(mod)
-            if hasattr(mod, "PAEPFutureNet"):
-                print(f"[PAEP] Loaded PAEPFutureNet from: {p}")
-                return getattr(mod, "PAEPFutureNet")
-        except Exception:
-            continue
-
-    raise ModuleNotFoundError("Cannot find PAEPFutureNet under repo/PAEP/**/paep_model.py")
-
-
-PAEPFutureNet = _load_paep_future_net()
+PAEPFutureNet = load_paep_future_net()
 
 
 class PAEPGatedDiffusionUnetImageForcePolicy(BaseImagePolicy):
@@ -81,6 +47,7 @@ class PAEPGatedDiffusionUnetImageForcePolicy(BaseImagePolicy):
         horizon: int,
         n_action_steps: int,
         n_obs_steps: int,
+
         # diffusion
         num_inference_steps: Optional[int] = None,
         obs_as_global_cond: bool = True,
@@ -89,34 +56,39 @@ class PAEPGatedDiffusionUnetImageForcePolicy(BaseImagePolicy):
         kernel_size: int = 5,
         n_groups: int = 8,
         cond_predict_scale: bool = True,
+
         # fusion
         n_heads: int = 8,
-        force_hist: int = 48,
+        force_hist: int = 36,
+
         # keys
         wrench_key: str = "left_robot_tcp_wrench",
         wrench_hist_key: str = "wrench_hist",
         pose_key: str = "left_robot_tcp_pose",
         gripper_key: str = "left_robot_gripper_width",
+
         # PAEP
         paep_ckpt: Optional[str] = None,
         paep_img_size: int = 224,
-        gmin: float = 0.0,
+        gmin: float = 0.0, #把 p_contact（0~1）压成门控强度 g_contact 时做下限截断，最低也给这么多“接触门控强度”
         freeze_paep: bool = True,
+
         # ---- PAEP as diffusion condition (clean semantics) ----
         use_paep_cond: bool = True,
         use_phase_emb: bool = False,          # False -> raw 4D; True -> embedding
         phase_emb_dim: int = 16,
         phase_emb_use_contact: bool = False,
-        phase_emb_use_logprob: bool = True,   # use log(p_phase) for richer signal
+        phase_emb_use_logprob: bool = True,   # 用 log-prob 提供更“线性/可分”的信号（小概率差异在 log 空间更明显），通常对 embedding 学习更友好。
+
         # fusion head-wise gate uses contact or not (your story choice)
         head_gate_use_contact: bool = False,
+
         # fusion (orthogonal residual)
-        fusion_alpha: float = 0.05,
-        #fusion_alpha: float = 0.0,
-        fusion_learnable_alpha: bool = False,
-        fusion_alpha_max: float = 0.2,
-        fusion_inj_ratio_cap: float | None = None,
-        fusion_enable_debug: bool = True,
+        fusion_alpha: float = 0.3,
+        fusion_learnable_alpha: bool = True,
+        fusion_alpha_max: float = 2.0,
+        fusion_inj_ratio_cap: float = 0.10 ,
+        fusion_enable_debug: bool = True, #控制 fusion 模块是否记录 _last_fusion_debug
         # logging
         log_wandb_every: int = 30,
         # parameters passed to scheduler.step (DP style)
@@ -135,18 +107,97 @@ class PAEPGatedDiffusionUnetImageForcePolicy(BaseImagePolicy):
         # DP-style proprio: 9+1 = 10
         self.proprio_dim = 10
 
+        self.freeze_paep = bool(freeze_paep)
+
         self.use_paep_cond = bool(use_paep_cond)
         self.use_phase_emb = bool(use_phase_emb)
         self.phase_emb_dim = int(phase_emb_dim)
         self.phase_emb_use_contact = bool(phase_emb_use_contact)
         self.phase_emb_use_logprob = bool(phase_emb_use_logprob)
+        # NOTE: must be defined before any use (paep_step_dim / fusion init)
+        self.paep_cfg = {}
+        self.paep_num_events = 3
 
+
+        # ---- PAEP ----
+        self.paep_img_size = int(paep_img_size)
+        self.gmin = float(gmin)
+
+        # buffers for PAEP normalization  persistent=False：不会写进 policy 的 state_dict
+        self.register_buffer("_paep_wm", torch.zeros(6), persistent=False)
+        self.register_buffer("_paep_ws", torch.ones(6), persistent=False)
+        self.register_buffer("_paep_pm", torch.zeros(9), persistent=False)
+        self.register_buffer("_paep_ps", torch.ones(9), persistent=False)
+
+        self._eval_step = 0
+        self.log_eval_every = int(log_wandb_every)
+
+
+
+        if paep_ckpt is not None:
+            ckpt = torch.load(paep_ckpt, map_location="cpu", weights_only=False)
+            self.paep_cfg = ckpt.get("cfg", {}) or {}
+            self.paep_num_events = int(self.paep_cfg.get("num_events", 3))
+
+            # build PAEP with correct num_events (IMPORTANT!)
+            self.paep = PAEPFutureNet(num_events=self.paep_num_events, img_pretrained=False)
+            self.paep.load_state_dict(ckpt["model"], strict=True)
+
+            # ---- PAEP imagenet norm buffers (create once, follow device) ----
+            self.register_buffer(
+                "_paep_img_mean",
+                torch.tensor([0.485, 0.456, 0.406], dtype=torch.float32).view(1, 3, 1, 1),
+                persistent=False,
+            )
+            self.register_buffer(
+                "_paep_img_std",
+                torch.tensor([0.229, 0.224, 0.225], dtype=torch.float32).view(1, 3, 1, 1),
+                persistent=False,
+            )
+
+            norm = ckpt.get("norm", None)
+            if norm is not None:
+                self._paep_wm.copy_(torch.as_tensor(norm["wrench_mean"]).float())
+                self._paep_ws.copy_(torch.as_tensor(norm["wrench_std"]).float().clamp_min(1e-6))
+                self._paep_pm.copy_(torch.as_tensor(norm["pose_mean"]).float())
+                self._paep_ps.copy_(torch.as_tensor(norm["pose_std"]).float().clamp_min(1e-6))
+        else:
+            # still create a PAEP with fallback num_events to avoid attribute errors
+            self.paep = PAEPFutureNet(num_events=self.paep_num_events, img_pretrained=False)
+        
+        if self.freeze_paep:
+            for p in self.paep.parameters():
+                p.requires_grad_(False)
+            self.paep.eval()
+
+        
+        # ---- fusion module (orthogonal residual) ----
+        self.fusion = DualGatedVisionForceFusion(
+            d_model=self.vision_dim,
+            n_heads=int(n_heads),
+            gate_hidden=128,
+            dropout=0.0,
+            num_events=self.paep_num_events,
+            use_contact_in_head_gate=bool(head_gate_use_contact),
+            use_ln=True,
+            ln_out=True,
+            eps=1e-6,
+            alpha=float(fusion_alpha),
+            learnable_alpha=bool(fusion_learnable_alpha),
+            alpha_max=float(fusion_alpha_max),
+            inj_ratio_cap=fusion_inj_ratio_cap,
+            enable_debug=bool(fusion_enable_debug),
+        )
+
+        # ---- PAEP cond dims (MUST be after paep_num_events is ready) ----
         if not self.use_paep_cond:
             paep_step_dim = 0
         else:
-            paep_step_dim = self.phase_emb_dim if self.use_phase_emb else 4  # raw4 = 3phase + 1contact
+            raw_paep_dim = int(self.paep_num_events) + 1  # phase(num_events) + contact(1)
+            paep_step_dim = self.phase_emb_dim if self.use_phase_emb else raw_paep_dim
         self.paep_step_dim = int(paep_step_dim)
 
+    
         self.cond_step_dim = int(self.vision_dim + self.proprio_dim + self.paep_step_dim)
 
         # ---- diffusion model (align DP: global_cond_dim = obs_feature_dim * n_obs_steps) ----
@@ -210,54 +261,13 @@ class PAEPGatedDiffusionUnetImageForcePolicy(BaseImagePolicy):
         )
         self.force_hist = int(force_hist)
 
-        # ---- fusion module (orthogonal residual) ----
-        self.fusion = DualGatedVisionForceFusion(
-            d_model=self.vision_dim,
-            n_heads=int(n_heads),
-            gate_hidden=128,
-            dropout=0.0,
-            use_contact_in_head_gate=bool(head_gate_use_contact),
-            use_ln=True,
-            ln_out=True,
-            eps=1e-6,
-            alpha=float(fusion_alpha),
-            learnable_alpha=bool(fusion_learnable_alpha),
-            alpha_max=float(fusion_alpha_max),
-            inj_ratio_cap=fusion_inj_ratio_cap,
-            enable_debug=bool(fusion_enable_debug),
-        )
-
-        # ---- PAEP ----
-        self.paep = PAEPFutureNet(num_events=3, img_pretrained=False)
-        self.paep_img_size = int(paep_img_size)
-        self.gmin = float(gmin)
-
-        self.register_buffer("_paep_wm", torch.zeros(6), persistent=False)
-        self.register_buffer("_paep_ws", torch.ones(6), persistent=False)
-        self.register_buffer("_paep_pm", torch.zeros(9), persistent=False)
-        self.register_buffer("_paep_ps", torch.ones(9), persistent=False)
-
-        if paep_ckpt is not None:
-            ckpt = torch.load(paep_ckpt, map_location="cpu")
-            self.paep.load_state_dict(ckpt["model"], strict=True)
-            norm = ckpt.get("norm", None)
-            if norm is not None:
-                self._paep_wm.copy_(torch.as_tensor(norm["wrench_mean"]).float())
-                self._paep_ws.copy_(torch.as_tensor(norm["wrench_std"]).float())
-                self._paep_pm.copy_(torch.as_tensor(norm["pose_mean"]).float())
-                self._paep_ps.copy_(torch.as_tensor(norm["pose_std"]).float())
-
-        if freeze_paep:
-            for p in self.paep.parameters():
-                p.requires_grad_(False)
-            self.paep.eval()
 
         # ---- PAEP embedding (optional) ----
         if self.use_paep_cond and self.use_phase_emb:
             # input dim:
             #   phase: 3 (or log-prob 3)
             #   + contact(1) if phase_emb_use_contact
-            emb_in_dim = 3 + (1 if self.phase_emb_use_contact else 0)
+            emb_in_dim = int(self.paep_num_events) + (1 if self.phase_emb_use_contact else 0)
             self.phase_emb_mlp = nn.Sequential(
                 nn.Linear(emb_in_dim, 128),
                 nn.ReLU(inplace=True),
@@ -272,6 +282,15 @@ class PAEPGatedDiffusionUnetImageForcePolicy(BaseImagePolicy):
         self._last_debug = None
         self._extra_step_log = None
 
+    def train(self, mode: bool = True):
+        super().train(mode)
+        # IMPORTANT: if PAEP is frozen, always keep it in eval()
+        if self.freeze_paep:
+            if hasattr(self, "paep") and (self.paep is not None):
+                self.paep.eval()
+        return self
+
+
     def _to_float(self, x):
         try:
             if torch.is_tensor(x):
@@ -281,24 +300,38 @@ class PAEPGatedDiffusionUnetImageForcePolicy(BaseImagePolicy):
             return None
 
     def _push_extra_log(self, d: dict, prefix: str = ""):
+        # throttle both train and eval to avoid overhead
+        if self.training:
+            if (self._train_step % self.log_wandb_every) != 0:
+                return
+        else:
+            if (self._eval_step % self.log_eval_every) != 0:
+                return
+
         if not hasattr(self, "_extra_step_log") or self._extra_step_log is None:
             self._extra_step_log = {}
+
         for k, v in (d or {}).items():
             fv = self._to_float(v)
-            if fv is not None:
-                self._extra_step_log[prefix + k] = fv
+            if fv is None:
+                continue
+            # ✅ only keep the original key once
+            self._extra_step_log[(prefix or "") + k] = fv
+
+
     
     def _pop_extra_log(self) -> dict:
-        """
-        Return and clear extra step log (scalar floats).
-        Safe for eval: no tensors, no big arrays.
-        """
         d = getattr(self, "_extra_step_log", None)
-        if not isinstance(d, dict):
+        if not isinstance(d, dict) or len(d) == 0:
             return {}
+
+        # return a copy for this step
         out = dict(d)
-        self._extra_step_log = {}  # clear
+
+        # keep non-wandb keys as a cache; clear only wandb/* to avoid duplicate wandb logs
+        self._extra_step_log = {k: v for k, v in d.items() if not str(k).startswith("wandb/")}
         return out
+
 
 
     # ----------------------------
@@ -361,41 +394,63 @@ class PAEPGatedDiffusionUnetImageForcePolicy(BaseImagePolicy):
     # PAEP forward
     # ----------------------------
     @torch.no_grad()
-    def _run_paep(self, ext_img, wrist_img, wrench_hist, pose):
+    def _run_paep(self, ext_img, left_wrist_img, right_wrist_img, wrench_hist, pose):
+        """
+        PAEP v2+ interface (3-view):
+          ext_img:         (B,3,H,W) float in [0,1]
+          left_wrist_img:  (B,3,H,W) float in [0,1]
+          right_wrist_img: (B,3,H,W) float in [0,1]
+          wrench_hist:     (B,L,6)
+          pose:            (B,9)
+
+        Returns:
+          p_phase:   (B,num_events)
+          p_contact: (B,1)
+        """
         # 1) resize to paep_img_size
         if ext_img.shape[-1] != self.paep_img_size or ext_img.shape[-2] != self.paep_img_size:
-            ext_img = F.interpolate(ext_img, size=(self.paep_img_size, self.paep_img_size),
-                                    mode="bilinear", align_corners=False)
-        if wrist_img.shape[-1] != self.paep_img_size or wrist_img.shape[-2] != self.paep_img_size:
-            wrist_img = F.interpolate(wrist_img, size=(self.paep_img_size, self.paep_img_size),
-                                    mode="bilinear", align_corners=False)
+            ext_img = F.interpolate(
+                ext_img, size=(self.paep_img_size, self.paep_img_size),
+                mode="bilinear", align_corners=False
+            )
+        if left_wrist_img.shape[-1] != self.paep_img_size or left_wrist_img.shape[-2] != self.paep_img_size:
+            left_wrist_img = F.interpolate(
+                left_wrist_img, size=(self.paep_img_size, self.paep_img_size),
+                mode="bilinear", align_corners=False
+            )
+        if right_wrist_img.shape[-1] != self.paep_img_size or right_wrist_img.shape[-2] != self.paep_img_size:
+            right_wrist_img = F.interpolate(
+                right_wrist_img, size=(self.paep_img_size, self.paep_img_size),
+                mode="bilinear", align_corners=False
+            )
 
-        # 2) normalize wrench/pose using ckpt stats
+        # ---- Apply ImageNet Normalization for PAEP (buffers created in __init__) ----
+        # imgs are already in [0,1]
+        mean = self._paep_img_mean.to(dtype=ext_img.dtype)
+        std  = self._paep_img_std.to(dtype=ext_img.dtype)
+
+        ext_img = (ext_img - mean) / std
+        left_wrist_img = (left_wrist_img - mean) / std
+        right_wrist_img = (right_wrist_img - mean) / std
+
+
+        # 2) normalize wrench/pose using ckpt stats (to match training pipeline)
         w = (wrench_hist - self._paep_wm[None, None, :]) / (self._paep_ws[None, None, :] + 1e-6)
         p = (pose - self._paep_pm[None, :]) / (self._paep_ps[None, :] + 1e-6)
 
-        # 3) pass img_size only if supported
-        import inspect
-        sig = inspect.signature(self.paep.forward)
-        if "img_size" in sig.parameters:
-            out = self.paep(ext_img, wrist_img, w, p, img_size=self.paep_img_size)
-        else:
-            out = self.paep(ext_img, wrist_img, w, p)
-            
-        import torch.distributed as dist
-        # def _rank0():
-        #     return (not dist.is_available()) or (not dist.is_initialized()) or dist.get_rank() == 0
-
-        # if _rank0() and (not hasattr(self, "_paep_dbg_once")):
-        #     self._paep_dbg_once = True
-        #     for kk, vv in out.items():
-        #         if torch.is_tensor(vv):
-        #             print(
-        #                 f"[DBG][paep_out] {kk} "
-        #                 f"shape={tuple(vv.shape)} "
-        #                 f"min={vv.min().item():.4f} max={vv.max().item():.4f} mean={vv.mean().item():.4f}"
-        #             )
-        # ================================================
+        # 3) call PAEP (prefer keyword args to be robust to signature changes)
+        try:
+            out = self.paep(
+                ext_img=ext_img,
+                left_wrist_img=left_wrist_img,
+                right_wrist_img=right_wrist_img,
+                wrench_hist=w,
+                pose=p,
+                img_size=self.paep_img_size,
+            )
+        except TypeError:
+            # fallback for older signature: (ext, left, right, wrench, pose, ...)
+            out = self.paep(ext_img, left_wrist_img, right_wrist_img, w, p, img_size=self.paep_img_size)
 
         return out["p_phase"], out["p_contact"]
 
@@ -415,8 +470,9 @@ class PAEPGatedDiffusionUnetImageForcePolicy(BaseImagePolicy):
 
         # ---- PAEP raw inputs (you used these keys in v4) ----
         # NOTE: ensure your dataset provides these keys; otherwise change here.
-        ext_raw = obs_raw["external_img"][:, :To]         # (B,To,3,H,W)
-        wrist_raw = obs_raw["left_wrist_img"][:, :To]     # (B,To,3,H,W)
+        ext_raw = obs_raw["external_img"][:, :To]              # (B,To,3,H,W)
+        left_wrist_raw = obs_raw["left_wrist_img"][:, :To]     # (B,To,3,H,W)
+        right_wrist_raw = obs_raw["right_wrist_img"][:, :To]   # (B,To,3,H,W)
         wrench_hist_raw = obs_raw[self.wrench_hist_key][:, :To]  # (B,To,L,6)
         pose_raw = obs_raw[self.pose_key][:, :To]               # (B,To,9)
 
@@ -437,34 +493,45 @@ class PAEPGatedDiffusionUnetImageForcePolicy(BaseImagePolicy):
         #     if k0 is not None and k0 in enc_nobs:
         #         x = enc_nobs[k0]  # (B,To,3,H,W)
         #         x0 = x[:, 0]      # (B,3,H,W)
-        #         print(f"[DBG][obs_encoder_in] key={k0} min={x0.min().item():.4f} max={x0.max().item():.4f} mean={x0.mean().item():.4f} std={x0.std().item():.4f}")
+        #         print(f"[rt][obs_encoder_in] key={k0} min={x0.min().item():.4f} max={x0.max().item():.4f} mean={x0.mean().item():.4f} std={x0.std().item():.4f}")
 
         v_feat = self.obs_encoder(flat_rgb)  # (B*To,Dv)
 
         # flatten PAEP inputs
         flat_ext = ext_raw.reshape(-1, *ext_raw.shape[2:])
-        flat_wrist = wrist_raw.reshape(-1, *wrist_raw.shape[2:])
+        flat_left_wrist = left_wrist_raw.reshape(-1, *left_wrist_raw.shape[2:])
+        flat_right_wrist = right_wrist_raw.reshape(-1, *right_wrist_raw.shape[2:])
         flat_wrench_raw = wrench_hist_raw.reshape(-1, *wrench_hist_raw.shape[2:])  # (B*To,L,6)
         flat_pose = pose_raw.reshape(-1, *pose_raw.shape[2:])                      # (B*To,9)
 
         # PAEP
-        p_phase, p_contact = self._run_paep(flat_ext, flat_wrist, flat_wrench_raw, flat_pose)
+        p_phase, p_contact = self._run_paep(flat_ext, flat_left_wrist, flat_right_wrist, flat_wrench_raw, flat_pose)
         g_contact = self._compute_g_contact(p_contact)
 
         # if _rank0():
         #     pc = p_contact
-        #     print(f"[DBG][paep] p_contact min={pc.min().item():.4f} max={pc.max().item():.4f} mean={pc.mean().item():.4f}")
+        #     print(f"[rt][paep] p_contact min={pc.min().item():.4f} max={pc.max().item():.4f} mean={pc.mean().item():.4f}")
         #     pp = p_phase
-        #     print(f"[DBG][paep] p_phase mean={pp.mean().item():.4f} (should be ~1/3 if uniform)")
+        #     print(f"[rt][paep] p_phase mean={pp.mean().item():.4f} (should be ~1/3 if uniform)")
 
         # wrench_hist for TCN (normalize by wrench_key if exists)
         flat_wrench_tcn = flat_wrench_raw
         if self._has_norm_key(self.wrench_key):
             try:
-                # normalize expects (..,6) — LinearNormalizer should handle
                 flat_wrench_tcn = self.normalizer[self.wrench_key].normalize(flat_wrench_raw)
             except Exception:
                 flat_wrench_tcn = flat_wrench_raw
+
+        with torch.no_grad():
+            has = 1.0 if self._has_norm_key(self.wrench_key) else 0.0
+            self._push_extra_log({
+                "wrench/has_norm": has,
+                "wrench/raw_mean": flat_wrench_raw.mean(),
+                "wrench/raw_std": flat_wrench_raw.std(),
+                "wrench/tcn_mean": flat_wrench_tcn.mean(),
+                "wrench/tcn_std": flat_wrench_tcn.std(),
+            })
+
 
         # if _rank0():
         #     raw_std = flat_wrench_raw.std().item()
@@ -472,7 +539,7 @@ class PAEPGatedDiffusionUnetImageForcePolicy(BaseImagePolicy):
         #     tcn_std = flat_wrench_tcn.std().item()
         #     tcn_mean = flat_wrench_tcn.mean().item()
         #     has = self._has_norm_key(self.wrench_key)
-        #     print(f"[DBG][wrench_hist] has_norm({self.wrench_key})={has} raw(mean,std)=({raw_mean:.4f},{raw_std:.4f})  normed(mean,std)=({tcn_mean:.4f},{tcn_std:.4f})")
+        #     print(f"[rt][wrench_hist] has_norm({self.wrench_key})={has} raw(mean,std)=({raw_mean:.4f},{raw_std:.4f})  normed(mean,std)=({tcn_mean:.4f},{tcn_std:.4f})")
 
 
         force_tokens, force_global = self.force_tcn(flat_wrench_tcn)  # (B*To,L,Dv), (B*To,Dv)
@@ -506,14 +573,14 @@ class PAEPGatedDiffusionUnetImageForcePolicy(BaseImagePolicy):
             })
 
         # ---- (B) attention stats (always available) ----
-        attn_dbg = getattr(self.fusion.cross_attn, "_last_attn_debug", None)
-        if isinstance(attn_dbg, dict):
-            self._push_extra_log(attn_dbg, prefix="attn/")
+        attn_rt = getattr(self.fusion.cross_attn, "_last_attn_debug", None)
+        if isinstance(attn_rt, dict):
+            self._push_extra_log(attn_rt, prefix="attn/")
 
         # ---- (C) fusion stats (need enable_debug=True) ----
-        fus_dbg = getattr(self.fusion, "_last_fusion_debug", None)
-        if isinstance(fus_dbg, dict):
-            self._push_extra_log(fus_dbg, prefix="fusion/")
+        fus_rt = getattr(self.fusion, "_last_fusion_debug", None)
+        if isinstance(fus_rt, dict):
+            self._push_extra_log(fus_rt, prefix="fusion/")
 
         # ---- (D) optional: force token norms ----
         with torch.no_grad():
@@ -556,13 +623,20 @@ class PAEPGatedDiffusionUnetImageForcePolicy(BaseImagePolicy):
         fused_step = torch.cat(cond_parts, dim=-1)         # (B*To, cond_step_dim)
         fused_step = fused_step.reshape(B, To, -1)         # (B,To,cond_step_dim)
 
-        # debug stash
+        # debug stash (only keep last obs-step to save memory)
         with torch.no_grad():
+            # p_phase/p_contact/g_contact are (B*To, ...)
+            To = int(self.n_obs_steps)
+            p_phase_bt = p_phase.reshape(B, To, int(self.paep_num_events))[:, -1].detach()   # (B, E)
+            p_contact_bt = p_contact.reshape(B, To, 1)[:, -1].detach()                       # (B, 1)
+            g_contact_bt = g_contact.reshape(B, To)[:, -1].detach()                          # (B,)
+
             self._last_debug = {
-                "p_phase": p_phase.detach(),
-                "p_contact": p_contact.detach(),
-                "g_contact": g_contact.detach(),
+                "p_phase_last": p_phase_bt,
+                "p_contact_last": p_contact_bt,
+                "g_contact_last": g_contact_bt,
             }
+
 
         return fused_step
 
@@ -617,6 +691,9 @@ class PAEPGatedDiffusionUnetImageForcePolicy(BaseImagePolicy):
 
         # split raw & dp obs
         obs_raw, obs_dp = self._split_raw_and_dp_obs(obs_dict)
+        if not self.training:
+            self._eval_step += 1
+
 
         value = next(iter(obs_dp.values()))
         B = value.shape[0]
@@ -663,26 +740,26 @@ class PAEPGatedDiffusionUnetImageForcePolicy(BaseImagePolicy):
         }
 
         # 1) PAEP probabilities (use the last obs step t = To-1)
-        dbg = getattr(self, "_last_debug", None)
-        if isinstance(dbg, dict):
+        rt = getattr(self, "_last_debug", None)
+        if isinstance(rt, dict):
             try:
                 To = int(self.n_obs_steps)
                 B = int(B)
 
                 # shapes: p_phase (B*To,3), p_contact (B*To,1), g_contact (B*To,)
-                p_phase = dbg["p_phase"].reshape(B, To, 3)[:, -1]          # (B,3)
-                p_contact = dbg["p_contact"].reshape(B, To, 1)[:, -1]      # (B,1)
-                g_contact = dbg["g_contact"].reshape(B, To)[:, -1]         # (B,)
-
-                phase_conf, phase_id = torch.max(p_phase, dim=-1)          # (B,), (B,)
+                p_phase = rt["p_phase_last"]          # (B,E)
+                p_contact = rt["p_contact_last"]      # (B,1)
+                g_contact = rt["g_contact_last"]      # (B,)
+                phase_conf, phase_id = torch.max(p_phase, dim=-1)
 
                 out.update({
-                    "paep_p_phase": p_phase,                               # (B,3)
-                    "paep_p_contact": p_contact,                           # (B,1)
-                    "paep_g_contact": g_contact.unsqueeze(-1),             # (B,1)
-                    "paep_phase_id": phase_id.unsqueeze(-1).to(torch.int64),  # (B,1)
-                    "paep_phase_conf": phase_conf.unsqueeze(-1),           # (B,1)
+                    "paep_p_phase": p_phase,
+                    "paep_p_contact": p_contact,
+                    "paep_g_contact": g_contact.unsqueeze(-1),
+                    "paep_phase_id": phase_id.unsqueeze(-1).to(torch.int64),
+                    "paep_phase_conf": phase_conf.unsqueeze(-1),
                 })
+
             except Exception:
                 pass
 
@@ -699,25 +776,35 @@ class PAEPGatedDiffusionUnetImageForcePolicy(BaseImagePolicy):
                 pass
 
         # --- PAEP scalars ---
-        _put_scalar("dbg_paep_phase_entropy", "paep/phase_entropy")
-        _put_scalar("dbg_paep_p_contact_mean", "paep/p_contact_mean")
-        _put_scalar("dbg_paep_g_contact_mean", "paep/g_contact_mean")
+        _put_scalar("rt_paep_phase_entropy", "paep/phase_entropy")
+        _put_scalar("rt_paep_p_contact_mean", "paep/p_contact_mean")
+        _put_scalar("rt_paep_g_contact_mean", "paep/g_contact_mean")
 
         # --- Fusion scalars (prefix in _encode_fused_obs was fusion/) ---
-        _put_scalar("dbg_fusion_inj_over_v", "fusion/inj_over_v_mean")
-        _put_scalar("dbg_fusion_scale_mean", "fusion/scale_mean")
-        _put_scalar("dbg_fusion_cos_vd", "fusion/cos_vd_mean")   # needs alias key added in fusion file (see patch 1)
-        _put_scalar("dbg_fusion_g_head_mean", "fusion/g_head_mean")
-        _put_scalar("dbg_fusion_v_norm_mean", "fusion/v_norm_mean")
+        _put_scalar("rt_fusion_inj_over_v", "fusion/inj_over_v_mean")
+        _put_scalar("rt_fusion_scale_mean", "fusion/scale_mean")
+        _put_scalar("rt_fusion_cos_vd", "fusion/cos_v_delta_mean")
+        _put_scalar("rt_fusion_effective_ratio", "fusion/effective_ratio_mean")
+        _put_scalar("rt_fusion_raw_scale_mean", "fusion/raw_scale_mean")
+
+
+        _put_scalar("rt_fusion_g_head_mean", "fusion/g_head_mean")
+        _put_scalar("rt_fusion_v_norm_mean", "fusion/v_norm_mean")
+        
 
         # --- Attention scalars ---
-        _put_scalar("dbg_attn_entropy", "attn/attn_entropy_mean")
-        _put_scalar("dbg_attn_max", "attn/attn_max_mean")
-        _put_scalar("dbg_attn_g_head_mean", "attn/g_head_mean")
+        _put_scalar("rt_attn_entropy", "attn/attn_entropy_mean")
+        _put_scalar("rt_attn_max", "attn/attn_max_mean")
+        _put_scalar("rt_attn_g_head_mean", "attn/g_head_mean")
 
         # --- Force encoder norms ---
-        _put_scalar("dbg_force_tokens_norm", "force/tokens_norm_mean")
-        _put_scalar("dbg_force_global_norm", "force/global_norm_mean")
+        _put_scalar("rt_force_tokens_norm", "force/tokens_norm_mean")
+        _put_scalar("rt_force_global_norm", "force/global_norm_mean")
+
+        _put_scalar("rt_wrench_has_norm", "wrench/has_norm")
+        _put_scalar("rt_wrench_raw_std", "wrench/raw_std")
+        _put_scalar("rt_wrench_tcn_std", "wrench/tcn_std")
+
 
         return out
 
@@ -731,6 +818,9 @@ class PAEPGatedDiffusionUnetImageForcePolicy(BaseImagePolicy):
           - masked mse loss on ~condition_mask
         """
         assert "valid_mask" not in batch
+        
+        if self.training:
+            self._train_step += 1
 
         obs = batch["obs"]
         obs_raw, obs_dp = self._split_raw_and_dp_obs(obs)
@@ -742,7 +832,7 @@ class PAEPGatedDiffusionUnetImageForcePolicy(BaseImagePolicy):
         # if _rank0():
         #     a_raw = batch["action"]
         #     a_n = nactions
-        #     print(f"[DBG][action_norm] raw(mean,std)=({a_raw.mean().item():.4f},{a_raw.std().item():.4f})  normed(mean,std)=({a_n.mean().item():.4f},{a_n.std().item():.4f})")
+        #     print(f"[rt][action_norm] raw(mean,std)=({a_raw.mean().item():.4f},{a_raw.std().item():.4f})  normed(mean,std)=({a_n.mean().item():.4f},{a_n.std().item():.4f})")
 
         batch_size = nactions.shape[0]
         horizon = nactions.shape[1]
@@ -800,27 +890,13 @@ class PAEPGatedDiffusionUnetImageForcePolicy(BaseImagePolicy):
         loss = loss * loss_mask.type(loss.dtype)
         loss = reduce(loss, "b ... -> b (...) ", "mean")
         loss = loss.mean()
-
-       
-        # optional debug log stash (won't affect DP training loop unless you use it)
-        self._train_step += 1
-        if isinstance(self._last_debug, dict):
-            dbg = self._last_debug
-            try:
-                # 使用 _push_extra_log 追加数据，而不是覆盖整个字典
-                self._push_extra_log({
-                    "debug/g_contact_mean": dbg["g_contact"].mean(),
-                    "debug/g_contact_min": dbg["g_contact"].min(),
-                    "debug/g_contact_max": dbg["g_contact"].max(),
-                    "debug/p_contact_mean": dbg["p_contact"].mean(),
-                    "debug/p_contact_min": dbg["p_contact"].min(),
-                    "debug/p_contact_max": dbg["p_contact"].max(),
-                })
-            except Exception:
-                pass
+        with torch.no_grad():
+            self._push_extra_log({
+                "action/naction_std": nactions.std(),
+                "action/naction_mean": nactions.mean(),
+            })
 
         return loss
 
     def forward(self, batch):
         return self.compute_loss(batch)
-

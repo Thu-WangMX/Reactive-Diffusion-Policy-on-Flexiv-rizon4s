@@ -1,5 +1,4 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
+#把某个 zarr 里的所有时间步都跑一遍 PAEP，输出 paep_prob_phase.npy 和 paep_prob_contact.npy，方便给 Fast 做离线 teacher/特征。
 
 import os, json
 import numpy as np

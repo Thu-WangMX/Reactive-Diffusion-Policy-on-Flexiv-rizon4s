@@ -17,7 +17,7 @@ from reactive_diffusion_policy.policy.base_image_policy import BaseImagePolicy
 from reactive_diffusion_policy.model.diffusion.conditional_unet1d import ConditionalUnet1D
 from reactive_diffusion_policy.model.diffusion.mask_generator import LowdimMaskGenerator
 from reactive_diffusion_policy.common.pytorch_util import dict_apply
-from reactive_diffusion_policy.model.force.force_encoder import ForceTCNTokenEncoder
+from reactive_diffusion_policy.model.force.tcn_encoder import ForceTCNTokenEncoder
 from reactive_diffusion_policy.model.attention.headwise_cro_attention import HeadWiseCrossAttention
 from reactive_diffusion_policy.model.force.dual_gated_v_f_fusion_v3 import DualGatedVisionForceFusion
 # ----------------------------
