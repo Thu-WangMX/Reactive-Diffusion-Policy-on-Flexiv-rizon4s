@@ -71,11 +71,11 @@ LOG_EVERY = 50
 # wandb
 USE_WANDB = True
 WANDB_PROJECT = "PAEP"
-WANDB_NAME = "paep_plugin_charger_tcn_last_0206"
+WANDB_NAME = "paep_plugin_usb_tcn_last_0211"
 
 # per-class weight multiplier (after inverse-frequency weight computed)
 PHASE_WEIGHT_MULT = {
-    "recovery": 0.3,   # 先压到 0.2~0.3 试试
+    #"recovery": 0.3,   # 先压到 0.2~0.3 试试
 }
 
 

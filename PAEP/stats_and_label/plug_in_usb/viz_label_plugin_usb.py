@@ -28,18 +28,18 @@ import cv2
 # =========================
 # 配置区：你只改这里
 # =========================
-ZARR_PATH = "/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/dataset/plug_in_charger/plug_in_charger_stream_downsample1_zarr/replay_buffer.zarr"
+ZARR_PATH = "/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/dataset/plug_in_usb/plug_in_usb_stream_downsample1_zarr/replay_buffer.zarr"
 
 # 选择 episode 范围（包含两端）
 EPISODE_ID_START = 0
-EPISODE_ID_END = 9
+EPISODE_ID_END = 10
 
 # 输出模式
 #   "per_episode": 每个 episode 单独一个 mp4（推荐）
 #   "concat":      把范围内所有 episode 串到一个 mp4
 MODE = "per_episode"
 
-OUT_DIR = "/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/PAEP/label_viz/plug_in_charger"
+OUT_DIR = "/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/PAEP/label_viz/plug_in_usb"
 
 # concat 模式的输出文件名
 OUT_MP4_CONCAT = f"{OUT_DIR}/ep{EPISODE_ID_START:03d}_to_ep{EPISODE_ID_END:03d}_plug_paep.mp4"

@@ -5,10 +5,10 @@ import os
 
 # ================= 配置区域 =================
 # Zarr 文件路径 (请修改为你实际的 replay_buffer.zarr 路径)
-ZARR_PATH = '/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/dataset/plug_in_stream_downsample1_zarr/replay_buffer.zarr'
+ZARR_PATH = '/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/dataset/plug_in_usb/plug_in_usb_stream_downsample1_zarr/replay_buffer.zarr'
 
 # 输出 JSON 文件名
-OUT_PATH = "/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/PAEP/config/paep_split_plugin_charger.json"
+OUT_PATH = "/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/PAEP/config/paep_split_plugin_usb.json"
 
 # 随机种子
 SEED = 0
