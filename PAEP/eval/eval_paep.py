@@ -3,7 +3,7 @@ Offline evaluation for PAEP best.pt (no argparse).
 - Loads ckpt best.pt
 - Loads zarr + split json
 - Evaluates N samples from split (dataset is random-sampling style)
-- Prints loss/acc/macroF1 + confusion matrices
+- Prints loss/acc/macroF1 + confusion matrices + Inference Time/FPS
 
 Run:
   python /home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/PAEP/train/eval_best_pt_noargs.py
@@ -12,6 +12,7 @@ Run:
 import os
 import sys
 import json
+import time  # [Added] needed for timing
 from typing import Dict, List
 
 import numpy as np
@@ -137,7 +138,14 @@ def evaluate(
     ys_p, ps_p = [], []
     ys_c, ps_c = [], []
 
-    for batch in loader:
+    # [Added] List to store inference time per batch
+    batch_times = []
+
+    # Optional: warmup CUDA to ensure accurate timing for the first few batches
+    if device.type == "cuda":
+        torch.cuda.synchronize()
+
+    for i, batch in enumerate(loader):
         ext = batch["ext_img"].to(device, non_blocking=True)
 
         # 3-view preferred
@@ -158,9 +166,23 @@ def evaluate(
         y_phase = batch["y_phase"].to(device, non_blocking=True).long()
         y_contact = batch["y_contact"].to(device, non_blocking=True).float().view(-1, 1)
 
+        # ------------------- Timing Start -------------------
+        if device.type == "cuda":
+            torch.cuda.synchronize()
+        t0 = time.time()
+
         logits_phase, logit_contact = model.forward_logits(
             ext, left, right, wrench, pose, norm=norm_torch, img_size=img_size
         )
+
+        if device.type == "cuda":
+            torch.cuda.synchronize()
+        t1 = time.time()
+        # Only record time for full batches to be fair, or record all. 
+        # Here we record all, but note that the last batch might be smaller.
+        # We will compute avg per sample later.
+        batch_times.append(t1 - t0)
+        # ------------------- Timing End -------------------
 
         lp = F.cross_entropy(logits_phase, y_phase, weight=phase_w_torch)
         lc = F.binary_cross_entropy_with_logits(logit_contact, y_contact)
@@ -196,6 +218,12 @@ def evaluate(
     acc_contact = float((y_contact_true == y_contact_pred).mean()) if len(y_contact_true) else 0.0
     mf1_contact = macro_f1(prf_contact)
 
+    # [Added] Calculate Timing Stats
+    total_inference_time = sum(batch_times)
+    avg_time_per_sample = total_inference_time / max(total_n, 1)
+    fps = 1.0 / avg_time_per_sample if avg_time_per_sample > 0 else 0.0
+    avg_time_per_batch = np.mean(batch_times) if batch_times else 0.0
+
     return {
         "n": int(total_n),
         "loss_phase": total_lp / max(total_n, 1),
@@ -208,6 +236,10 @@ def evaluate(
         "cm_contact": cm_contact,
         "prf_phase": prf_phase,
         "prf_contact": prf_contact,
+        # Timing stats
+        "avg_time_per_sample_ms": avg_time_per_sample * 1000.0,
+        "avg_time_per_batch_ms": avg_time_per_batch * 1000.0,
+        "fps": fps
     }
 
 
@@ -293,7 +325,7 @@ def main():
     print("[EVAL] phase_w (used_final=%s): %s" % (_used_final_phase_w, phase_w_torch.detach().cpu().numpy()))
 
 
-
+    # NOTE: Measuring pure inference time usually benefits from pin_memory=True and persistent_workers=True
     loader = DataLoader(
         ds_take,
         batch_size=BATCH_SIZE,
@@ -317,6 +349,13 @@ def main():
     print(f"acc_contact  = {out['acc_contact']:.4f}")
     print(f"macro_f1_phase   = {out['macro_f1_phase']:.4f}")
     print(f"macro_f1_contact = {out['macro_f1_contact']:.4f}")
+
+    # [Added] Print Timing Stats
+    print("\n==================== TIMING ====================")
+    print(f"Inference Batch Size : {BATCH_SIZE}")
+    print(f"Avg Time per Batch   : {out['avg_time_per_batch_ms']:.2f} ms")
+    print(f"Avg Time per Sample  : {out['avg_time_per_sample_ms']:.2f} ms")
+    print(f"Inference FPS        : {out['fps']:.2f}")
 
     # Phase confusion matrix
     print("\n[Phase Confusion Matrix] row=true col=pred")
@@ -363,6 +402,10 @@ def main():
             "acc_contact": out["acc_contact"],
             "macro_f1_phase": out["macro_f1_phase"],
             "macro_f1_contact": out["macro_f1_contact"],
+            # [Added] Save Timing Stats
+            "avg_time_per_sample_ms": out["avg_time_per_sample_ms"],
+            "avg_time_per_batch_ms": out["avg_time_per_batch_ms"],
+            "fps": out["fps"],
         },
         "cm_phase": out["cm_phase"].tolist(),
         "cm_contact": out["cm_contact"].tolist(),

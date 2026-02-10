@@ -26,6 +26,7 @@ from reactive_diffusion_policy.real_world.real_inference_util import get_real_ob
 from reactive_diffusion_policy.real_world.real_world_transforms import RealWorldTransforms
 from reactive_diffusion_policy.common.space_utils import ortho6d_to_rotation_matrix
 from reactive_diffusion_policy.common.ensemble import EnsembleBuffer
+from reactive_diffusion_policy.debug_snippets.runner_fusion_debug import should_log, log_fusion_debug, extract_fusion_debug
 from reactive_diffusion_policy.common.action_utils import (
     interpolate_actions_with_ratio,
     relative_actions_to_absolute_actions,
@@ -55,7 +56,6 @@ from Fast.fast_deploy_runtime import FastDeployer, FastGateConfig
 
 __all__ = ["RealRunner"]
 
-PAEP_EVENT_NAMES = ["idle", "approach", "under", "effective", "over", "retreat"]
 
 
 def _now_timestamp():
@@ -66,36 +66,17 @@ def _sanitize(s: str):
     return "".join(c if (c.isalnum() or c in "-_.") else "_" for c in str(s))
 
 
-def _make_fz_run_dir(output_dir: str, policy_name: str, run_ts: str):
-    run_dir = osp.join(output_dir, "fz_logs_wiping_board_OOD", _sanitize(policy_name), run_ts)
+def _make_fz_run_dir(output_dir: str, task_name: str, policy_name: str, run_ts: str):
+    # e.g. output_dir/fz_logs_<task_name>/<policy_name>/<timestamp>/
+    run_dir = osp.join(
+        output_dir,
+        f"fz_logs_{_sanitize(task_name)}",
+        run_ts,
+    )
     os.makedirs(run_dir, exist_ok=True)
     return run_dir
 
 
-def _open_fz_csv(run_dir: str, episode_idx: int):
-    csv_path = osp.join(run_dir, f"episode_{episode_idx:03d}_left_tcp_fz.csv")
-    f = open(csv_path, "w", newline="")
-    w = csv.writer(f)
-    w.writerow(["wall_time", "step_count", "fz"])
-    return csv_path, f, w
-
-
-def _extract_fz_from_obs(np_obs_dict):
-    candidate_keys = [
-        "left_tcp_wrench", "tcp_wrench", "wrench",
-        "left_wrench", "robot0_tcp_wrench", "left_robot_tcp_wrench",
-    ]
-    key = next((k for k in candidate_keys if k in np_obs_dict), None)
-    if key is None:
-        return None
-    w = np.asarray(np_obs_dict[key])
-    while w.ndim > 2:
-        w = w[0]
-    if w.ndim == 2:
-        w = w[-1]
-    if w.shape[-1] < 3:
-        return None
-    return float(w[2])
 
 
 # --- thread env settings ---
@@ -103,12 +84,21 @@ os.environ["OPENBLAS_NUM_THREADS"] = "12"
 os.environ["MKL_NUM_THREADS"] = "12"
 os.environ["NUMEXPR_NUM_THREADS"] = "12"
 os.environ["OMP_NUM_THREADS"] = "12"
-cv2.setNumThreads(12)
 
 total_cores = psutil.cpu_count()
 num_cores_to_bind = 10
 cores_to_bind = set(range(min(num_cores_to_bind, total_cores)))
-os.sched_setaffinity(0, cores_to_bind)
+
+try:
+    cv2.setNumThreads(12)
+except Exception as e:
+    logger.warning(f"[CPU] cv2.setNumThreads failed: {repr(e)}")
+
+try:
+    os.sched_setaffinity(0, cores_to_bind)
+except Exception as e:
+    logger.warning(f"[CPU] sched_setaffinity failed: {repr(e)}")
+
 
 
 class RealRunner:
@@ -193,6 +183,18 @@ class RealRunner:
         self._phase_lock = threading.Lock()
         self._latest_phase_id = None
 
+        # ---- PAEP polling thread (control_fps) ----
+        self._paep_stop = threading.Event()
+        self._paep_thread = None
+        self._paep_cache_lock = threading.Lock()
+
+        # cache (latest step, for fast & diffusion tiling)
+        self._fast_paep_p_contact = None  # scalar float
+        self._fast_paep_p_phase = None    # np.ndarray (E,)
+        
+        self._policy_infer_lock = threading.Lock()
+
+
 
         # --- keys ---
         self.rgb_keys = []
@@ -217,26 +219,22 @@ class RealRunner:
 
         self.output_dir = output_dir
         self.policy_name = task_name if task_name is not None else "ours"
-        self.paep_logger = self._setup_paep_logger(self.output_dir)
+
 
         self._fz_run_ts = None
         self._fz_run_dir = None
 
-        self.debug_path = os.path.join(self.output_dir, "debug_run.jsonl")
 
-        self._dbg_f = open(self.debug_path, "a", buffering=1)
-
-        self._dbg_step = 0
+        # ---- debug buffer (no realtime IO, dump once per episode) ----
+        self._dbg_buf = []   # list[dict], cleared every episode
 
         def _dbg(tag, **kw):
             rec = {
                 "t": time.time(),
-                "step": int(getattr(self, "_dbg_step", 0)),
                 "tag": str(tag),
                 **kw,
             }
-            json.dump(rec, self._dbg_f)
-            self._dbg_f.write("\n")
+            self._dbg_buf.append(rec)
 
         self._dbg = _dbg
 
@@ -355,8 +353,7 @@ class RealRunner:
         self.fast_debug_log_every = int(fast_debug_log_every)
         self._fast = None
         self._fast_last_dbg = None
-        self._fast_paep_p_contact = None
-        self._fast_paep_p_phase = None
+
 
         if self.enable_fast:
             if (not fast_ckpt_path) or (not fast_meta_path):
@@ -386,6 +383,21 @@ class RealRunner:
                 verbose=True,
             )
             logger.info("[FAST] enabled ✅")
+
+    def _warn_throttle(self, key: str, msg: str, every: int = 60):
+        # print at most once per `every` steps (per key)
+        if not hasattr(self, "_warn_ctr"):
+            self._warn_ctr = {}
+        c = int(self._warn_ctr.get(key, 0)) + 1
+        self._warn_ctr[key] = c
+        if (c % every) == 0:
+            logger.warning(msg)
+        # always store in dbg buffer
+        try:
+            self._dbg("warn", key=str(key), msg=str(msg), ctr=int(c))
+        except Exception:
+            pass
+
 
 
     def _setup_paep_logger(self, output_dir: str):
@@ -557,54 +569,54 @@ class RealRunner:
             self._last_tcp_step_action = tcp_step_action
             self._last_gripper_step_action = gripper_step_action
 
-            if self.use_latent_action_with_rnn_decoder:
-                tcp_extended_obs_step = int(tcp_step_action[-1])
-                gripper_extended_obs_step = int(gripper_step_action[-1])
-                tcp_step_action = tcp_step_action[:-1]
-                gripper_step_action = gripper_step_action[:-1]
+            # if self.use_latent_action_with_rnn_decoder:
+            #     tcp_extended_obs_step = int(tcp_step_action[-1])
+            #     gripper_extended_obs_step = int(gripper_step_action[-1])
+            #     tcp_step_action = tcp_step_action[:-1]
+            #     gripper_step_action = gripper_step_action[:-1]
 
-                longer_extended_obs_step = max(tcp_extended_obs_step, gripper_extended_obs_step)
-                obs_temporal_downsample_ratio = self.obs_temporal_downsample_ratio if self.downsample_extended_obs else 1
-                extended_obs = self.env.get_obs(longer_extended_obs_step, temporal_downsample_ratio=obs_temporal_downsample_ratio)
+            #     longer_extended_obs_step = max(tcp_extended_obs_step, gripper_extended_obs_step)
+            #     obs_temporal_downsample_ratio = self.obs_temporal_downsample_ratio if self.downsample_extended_obs else 1
+            #     extended_obs = self.env.get_obs(longer_extended_obs_step, temporal_downsample_ratio=obs_temporal_downsample_ratio)
 
-                if self.use_relative_action:
-                    action_dim = self.shape_meta["obs"]["left_robot_tcp_pose"]["shape"][0]
-                    if "right_robot_tcp_pose" in self.shape_meta["obs"]:
-                        action_dim += self.shape_meta["obs"]["right_robot_tcp_pose"]["shape"][0]
-                    tcp_base_absolute_action = tcp_step_action[-action_dim:]
-                    gripper_base_absolute_action = gripper_step_action[-action_dim:]
-                    tcp_step_action = tcp_step_action[:-action_dim]
-                    gripper_step_action = gripper_step_action[:-action_dim]
+            #     if self.use_relative_action:
+            #         action_dim = self.shape_meta["obs"]["left_robot_tcp_pose"]["shape"][0]
+            #         if "right_robot_tcp_pose" in self.shape_meta["obs"]:
+            #             action_dim += self.shape_meta["obs"]["right_robot_tcp_pose"]["shape"][0]
+            #         tcp_base_absolute_action = tcp_step_action[-action_dim:]
+            #         gripper_base_absolute_action = gripper_step_action[-action_dim:]
+            #         tcp_step_action = tcp_step_action[:-action_dim]
+            #         gripper_step_action = gripper_step_action[:-action_dim]
 
-                np_extended_obs_dict = dict(extended_obs)
-                np_extended_obs_dict = get_real_obs_dict(env_obs=np_extended_obs_dict, shape_meta=self.shape_meta, is_extended_obs=True)
-                np_extended_obs_dict, _ = self.pre_process_extended_obs(np_extended_obs_dict)
-                extended_obs_dict = dict_apply(np_extended_obs_dict, lambda x: torch.from_numpy(x).unsqueeze(0))
+            #     np_extended_obs_dict = dict(extended_obs)
+            #     np_extended_obs_dict = get_real_obs_dict(env_obs=np_extended_obs_dict, shape_meta=self.shape_meta, is_extended_obs=True, bgr_to_rgb=True)
+            #     np_extended_obs_dict, _ = self.pre_process_extended_obs(np_extended_obs_dict)
+            #     extended_obs_dict = dict_apply(np_extended_obs_dict, lambda x: torch.from_numpy(x).unsqueeze(0))
 
-                tcp_step_latent_action = torch.from_numpy(tcp_step_action.astype(np.float32)).unsqueeze(0)
-                gripper_step_latent_action = torch.from_numpy(gripper_step_action.astype(np.float32)).unsqueeze(0)
+            #     tcp_step_latent_action = torch.from_numpy(tcp_step_action.astype(np.float32)).unsqueeze(0)
+            #     gripper_step_latent_action = torch.from_numpy(gripper_step_action.astype(np.float32)).unsqueeze(0)
 
-                dor = self.dataset_obs_temporal_downsample_ratio
-                tcp_step_action = policy.predict_from_latent_action(tcp_step_latent_action, extended_obs_dict, tcp_extended_obs_step, dor)["action"][0].detach().cpu().numpy()
-                gripper_step_action = policy.predict_from_latent_action(gripper_step_latent_action, extended_obs_dict, gripper_extended_obs_step, dor)["action"][0].detach().cpu().numpy()
+            #     dor = self.dataset_obs_temporal_downsample_ratio
+            #     tcp_step_action = policy.predict_from_latent_action(tcp_step_latent_action, extended_obs_dict, tcp_extended_obs_step, dor)["action"][0].detach().cpu().numpy()
+            #     gripper_step_action = policy.predict_from_latent_action(gripper_step_latent_action, extended_obs_dict, gripper_extended_obs_step, dor)["action"][0].detach().cpu().numpy()
 
-                if self.use_relative_action:
-                    tcp_step_action = relative_actions_to_absolute_actions(tcp_step_action, tcp_base_absolute_action)
-                    gripper_step_action = relative_actions_to_absolute_actions(gripper_step_action, gripper_base_absolute_action)
+            #     if self.use_relative_action:
+            #         tcp_step_action = relative_actions_to_absolute_actions(tcp_step_action, tcp_base_absolute_action)
+            #         gripper_step_action = relative_actions_to_absolute_actions(gripper_step_action, gripper_base_absolute_action)
 
-                if tcp_step_action.shape[-1] == 4:
-                    tcp_len = 3
-                elif tcp_step_action.shape[-1] == 8:
-                    tcp_len = 6
-                elif tcp_step_action.shape[-1] == 10:
-                    tcp_len = 9
-                elif tcp_step_action.shape[-1] == 20:
-                    tcp_len = 18
-                else:
-                    raise NotImplementedError
+            #     if tcp_step_action.shape[-1] == 4:
+            #         tcp_len = 3
+            #     elif tcp_step_action.shape[-1] == 8:
+            #         tcp_len = 6
+            #     elif tcp_step_action.shape[-1] == 10:
+            #         tcp_len = 9
+            #     elif tcp_step_action.shape[-1] == 20:
+            #         tcp_len = 18
+            #     else:
+            #         raise NotImplementedError
 
-                tcp_step_action = tcp_step_action[-1][:tcp_len]
-                gripper_step_action = gripper_step_action[-1][tcp_len:]
+            #     tcp_step_action = tcp_step_action[-1][:tcp_len]
+            #     gripper_step_action = gripper_step_action[-1][tcp_len:]
 
             # ---- FAST residual injection (abs9d in, abs9d out) ----
             if self.enable_fast and (self._fast is not None):
@@ -618,135 +630,53 @@ class RealRunner:
                             wrench6 = np.zeros((6,), dtype=np.float32)
 
                         base_abs9d = tcp_step_action[:9].astype(np.float32)
+
+                        # ✅ copy PAEP cache under lock (avoid tearing / race)
+                        with self._paep_cache_lock:
+                            pc = self._fast_paep_p_contact
+                            pp = self._fast_paep_p_phase
+
+                        # guard: PAEP cache not ready -> skip fast this step
+                        if (pc is None) or (pp is None):
+                            raise RuntimeError(f"[FAST] skip: paep cache not ready (pc={pc}, pp_is_none={pp is None})")
+
                         cmd_abs9d, dbg = self._fast.step(
                             base_abs9d=base_abs9d,
                             wrench6=wrench6,
-                            p_contact=self._fast_paep_p_contact,
-                            p_phase=self._fast_paep_p_phase,
+                            p_contact=float(pc),
+                            p_phase=np.asarray(pp, dtype=np.float32).reshape(-1),
                         )
+
 
                         tcp_step_action = tcp_step_action.copy()
                         tcp_step_action[:9] = cmd_abs9d
                         self._fast_last_dbg = dbg
-                        # --- richer debug print + rule check ---
-                        if self.fast_debug_log_every > 0 and (self.action_step_count % self.fast_debug_log_every) == 0:
-                            import math
+                        
 
-                            def _arr(x):
-                                if x is None:
-                                    return None
-                                try:
-                                    return np.asarray(x, dtype=np.float32).reshape(-1)
-                                except Exception:
-                                    return None
+                        # if self.fast_debug_log_every > 0 and (self.action_step_count % self.fast_debug_log_every) == 0:
+                        #     try:
+                        #         w_raw = np.asarray(dbg.get("wrench_raw", wrench6), dtype=np.float32).reshape(-1)[:6]
+                        #         fz = float(w_raw[2])
 
-                            def _f(x, default=float("nan")):
-                                try:
-                                    if x is None:
-                                        return float(default)
-                                    if isinstance(x, (np.floating, float, int)):
-                                        return float(x)
-                                    if isinstance(x, (list, tuple)) and len(x) == 1:
-                                        return float(x[0])
-                                    return float(x)
-                                except Exception:
-                                    return float(default)
+                        #         dz_base = float(np.asarray(dbg.get("delta_p_base", [np.nan, np.nan, np.nan]), dtype=np.float32).reshape(-1)[2])
+                        #         dz_ee   = float(np.asarray(dbg.get("delta_p_ee",   [np.nan, np.nan, np.nan]), dtype=np.float32).reshape(-1)[2])
 
-                            def _z(v):
-                                v = _arr(v)
-                                return float(v[2]) if (v is not None and v.size >= 3) else float("nan")
+                        #         alpha    = dbg.get("alpha", None)
+                        #         pc_dbg   = dbg.get("pc", None)
+                        #         phase_id = dbg.get("phase_id", None)
 
-                            def _s(v, eps=1e-9):
-                                # sign with deadzone
-                                if v is None or (isinstance(v, float) and (math.isnan(v) or math.isinf(v))):
-                                    return 0
-                                if abs(v) <= eps:
-                                    return 0
-                                return 1 if v > 0 else -1
+                        #         fz_target   = float(dbg.get("fz_target", -20.0))
+                        #         fz_deadband = float(dbg.get("fz_deadband", 0.5))
+                        #         expected    = dbg.get("fast_rule_expected", "NA")
+                        #         ok          = bool(dbg.get("fast_rule_ok", True))
 
-                            # -------------------------
-                            # 1) wrench: raw + normed (if deployer provides)
-                            # -------------------------
-                            w_raw = _arr(dbg.get("wrench_raw", wrench6))   # fallback to runner's wrench6
-                            w_norm = _arr(dbg.get("wrench_normed", None))  # may be None if deployer not filled
-
-                            fx = float(w_raw[0]) if (w_raw is not None and w_raw.size >= 1) else float("nan")
-                            fy = float(w_raw[1]) if (w_raw is not None and w_raw.size >= 2) else float("nan")
-                            fz = float(w_raw[2]) if (w_raw is not None and w_raw.size >= 3) else float("nan")  # ✅ z-force index=2
-                            tx = float(w_raw[3]) if (w_raw is not None and w_raw.size >= 4) else float("nan")
-                            ty = float(w_raw[4]) if (w_raw is not None and w_raw.size >= 5) else float("nan")
-                            tz = float(w_raw[5]) if (w_raw is not None and w_raw.size >= 6) else float("nan")
-
-                            fz_n = float(w_norm[2]) if (w_norm is not None and w_norm.size >= 3) else float("nan")
-
-                            # -------------------------
-                            # 2) fast output deltas
-                            # -------------------------
-                            dz_pred9 = _z(dbg.get("delta_pred9", None))           # model raw prediction (before alpha)
-                            dz_app9  = _z(dbg.get("delta_applied9", None))        # after alpha (and maybe rot kept)
-                            dz_pre   = _z(dbg.get("delta_p_ee_preclip", None))    # alpha*pred before clip (if exists)
-                            dz_ee    = _z(dbg.get("delta_p_ee", None))            # ee delta AFTER clip
-                            dz_base  = _z(dbg.get("delta_p_base", None))          # base delta AFTER R_base @ dz_ee
-
-                            alpha   = dbg.get("alpha", None)
-                            pc      = dbg.get("pc", None)
-                            phase_id = dbg.get("phase_id", None)
-                            clip_w  = dbg.get("clip_ratio_wrench", None)
-                            clip_dp = dbg.get("clip_ratio_delta", None)
-                            mask_dp = dbg.get("delta_p_ee_clipped_mask", None)
-
-                            # -------------------------
-                            # 3) “铁律”检查：以 fz_target=-20 为例
-                            #    你的定义：更负 => 力更大 => 应该抬起；更正(不够负) => 应该下压
-                            # -------------------------
-                            fz_target = float(dbg.get("fz_target", -20.0))
-                            fz_deadband = float(dbg.get("fz_deadband", 0.5))
-
-                            dz_eps = 1e-6          # delta太小不判断
-
-                            expected = "HOLD"
-                            ok = True
-
-                            if not (math.isnan(fz) or math.isinf(fz)):
-                                err = fz - fz_target
-                                if abs(err) <= fz_deadband:
-                                    expected = "HOLD"
-                                    ok = True
-                                elif err > 0:
-                                    # fz 比 target 更“正”(更不负) => 力偏小 => 该 PRESS_DOWN
-                                    expected = "PRESS_DOWN"
-                                    # 你的口径：PRESS_DOWN => base为负，ee为正（说明 ee-z 与 base-z 方向相反）
-                                    ok_base = (_s(dz_base, dz_eps) == -1)
-                                    ok_ee   = (_s(dz_ee,   dz_eps) == +1)
-                                    ok = bool(ok_base and ok_ee)
-                                else:
-                                    # fz 比 target 更“负” => 力偏大 => 该 LIFT_UP
-                                    expected = "LIFT_UP"
-                                    ok_base = (_s(dz_base, dz_eps) == +1)
-                                    ok_ee   = (_s(dz_ee,   dz_eps) == -1)
-                                    ok = bool(ok_base and ok_ee)
-
-                            # -------------------------
-                            # 4) 打印一行：fast 是否真在工作（alpha/pc/phase） + 铁律是否满足
-                            # -------------------------
-                            logger.info(
-                                f"[FAST_CMP] f_raw=[{fx:+.2f},{fy:+.2f},{fz:+.2f}] "
-                                f"t_raw=[{tx:+.2f},{ty:+.2f},{tz:+.2f}] fz_n={fz_n:+.2f} | "
-                                f"dz_pred9={dz_pred9:+.6f} dz_app9={dz_app9:+.6f} dz_pre={dz_pre:+.6f} | "
-                                f"dz_ee={dz_ee:+.6f} dz_base={dz_base:+.6f} | "
-                                f"alpha={alpha} pc={pc} phase_id={phase_id} clip_w={clip_w} clip_dp={clip_dp} mask={mask_dp}"
-                            )
-
-                            expected = dbg.get("fast_rule_expected", expected)
-                            ok = bool(dbg.get("fast_rule_ok", ok))
-
-                            logger.info(
-                                f"[FAST_RULE] fz={fz:+.3f} target={fz_target:+.1f} deadband={fz_deadband:.1f} "
-                                f"expected={expected} ok={ok} | "
-                                f"dz_base={dz_base:+.6f} dz_ee={dz_ee:+.6f} alpha={alpha} pc={pc} phase_id={phase_id}"
-                            )
-
-
+                        #         logger.info(
+                        #             f"[FAST] step={self.action_step_count} fz={fz:+.2f} tgt={fz_target:+.1f} db={fz_deadband:.1f} "
+                        #             f"dz_base_z={dz_base:+.6f} dz_ee_z={dz_ee:+.6f} "
+                        #             f"alpha={alpha} pc={pc_dbg} phase={phase_id} expected={expected} ok={ok}"
+                        #         )
+                        #     except Exception as _e:
+                        #         logger.warning(f"[FAST_DBG] failed: {repr(_e)}")
 
 
 
@@ -777,6 +707,10 @@ class RealRunner:
         
             with self._phase_lock:
                 phase_id = self._latest_phase_id
+
+            # ---- log Fz + PAEP strictly at control_fps (aligned to execute_action) ----
+            self._log_ctrl_fz_and_paep(control_step=int(self.action_step_count))
+
 
             self.env.execute_action(
                 step_action,
@@ -809,6 +743,118 @@ class RealRunner:
     # ---------------------------------------------------------------------
     # Dense wrench polling (24Hz) -> build dataset-aligned wrench_hist
     # ---------------------------------------------------------------------
+
+    def _infer_paep_only(self, policy, obs_dict):
+        """
+        Try best-effort to run PAEP without running diffusion.
+        Returns: (phase_id, p_contact, p_phase_vec, phase_conf, g_contact)
+        """
+        # 1) preferred: explicit API
+        if hasattr(policy, "predict_paep"):
+            out = policy.predict_paep(obs_dict)
+            # expect torch tensors
+            phase_id = int(out.get("paep_phase_id").detach().cpu().numpy().reshape(-1)[0])
+            p_contact = float(out.get("paep_p_contact").detach().cpu().numpy().reshape(-1)[0])
+            p_phase = out.get("paep_p_phase").detach().cpu().numpy().reshape(-1)
+            phase_conf = float(out.get("paep_phase_conf", torch.tensor(float("nan"))).detach().cpu().numpy().reshape(-1)[0])
+            g_contact = float(out.get("paep_g_contact", torch.tensor(float("nan"))).detach().cpu().numpy().reshape(-1)[0])
+            return phase_id, p_contact, p_phase, phase_conf, g_contact
+
+        # 2) fallback: some policies expose a paep module
+        for attr in ["paep", "paep_net", "paep_model", "_paep", "paep_future_net"]:
+            if hasattr(policy, attr):
+                m = getattr(policy, attr)
+                if callable(m):
+                    out = m(obs_dict)
+                else:
+                    # module with forward
+                    out = m(obs_dict)
+
+                # tolerate dict outputs
+                if isinstance(out, dict):
+                    if "paep_phase_id" in out and "paep_p_contact" in out and "paep_p_phase" in out:
+                        phase_id = int(out["paep_phase_id"].detach().cpu().numpy().reshape(-1)[0])
+                        p_contact = float(out["paep_p_contact"].detach().cpu().numpy().reshape(-1)[0])
+                        p_phase = out["paep_p_phase"].detach().cpu().numpy().reshape(-1)
+                        phase_conf = float(out.get("paep_phase_conf", torch.tensor(float("nan"))).detach().cpu().numpy().reshape(-1)[0])
+                        g_contact = float(out.get("paep_g_contact", torch.tensor(float("nan"))).detach().cpu().numpy().reshape(-1)[0])
+                        return phase_id, p_contact, p_phase, phase_conf, g_contact
+        if not hasattr(self, "_warn_paep_api_once"):
+            self._warn_paep_api_once = True
+            logger.warning("[PAEP_CTRL] policy has no predict_paep() and no paep module hook; polling will not update cache.")
+
+
+        # 3) last resort: cannot infer PAEP only
+        return None, None, None, None, None
+
+
+    def _paep_poll_thread(self, policy, device):
+        """
+        Run PAEP at control_fps, update shared cache for BOTH diffusion and fast.
+        """
+        dt = self.control_interval_time
+        self._paep_stop.clear()
+
+        step_idx = 0
+        while not self._paep_stop.is_set():
+            t0 = time.time()
+            try:
+                obs = self.env.get_obs(obs_steps=self.n_obs_steps, temporal_downsample_ratio=self.obs_temporal_downsample_ratio)
+                if len(obs) > 0:
+                    np_obs_dict = dict(obs)
+                    np_obs_dict = get_real_obs_dict(env_obs=np_obs_dict, shape_meta=self.shape_meta, bgr_to_rgb=True)
+                    np_obs_dict, _ = self.pre_process_obs(np_obs_dict)
+                    obs_dict = dict_apply(np_obs_dict, lambda x: torch.from_numpy(x).unsqueeze(0).to(device=device))
+
+                    # keep wrench_hist consistent (same as diffusion loop)
+                    if self.enable_dense_wrench_hist:
+                        try:
+                            To = int(obs_dict["left_robot_tcp_wrench"].shape[1]) if "left_robot_tcp_wrench" in obs_dict else int(self.n_obs_steps)
+                            wh = self._build_wrench_hist_from_dense(To=To)
+                            if wh is not None:
+                                wh_t = torch.from_numpy(wh).unsqueeze(0).to(device=device)
+                                obs_dict["wrench_hist"] = wh_t
+                        except Exception:
+                            pass
+
+                    with torch.no_grad():
+                        with self._policy_infer_lock:
+                            phase_id, pc, p_phase, conf, g = self._infer_paep_only(policy, obs_dict)
+
+
+                    if pc is not None and p_phase is not None:
+                        with self._paep_cache_lock:
+                            self._fast_paep_p_contact = float(pc)
+                            self._fast_paep_p_phase = np.asarray(p_phase, dtype=np.float32).reshape(-1)
+                        with self._phase_lock:
+                            self._latest_phase_id = phase_id
+
+
+            except Exception as e:
+                logger.warning(f"[PAEP_CTRL] poll failed: {repr(e)}")
+
+            step_idx += 1
+            precise_sleep(max(0.0, dt - (time.time() - t0)))
+
+
+    def _start_paep_polling(self, policy, device):
+        if self._paep_thread is not None:
+            return
+        self._paep_stop.clear()
+        self._paep_thread = threading.Thread(target=self._paep_poll_thread, args=(policy, device), daemon=True)
+        self._paep_thread.start()
+
+
+    def _stop_paep_polling(self):
+        if self._paep_thread is None:
+            return
+        self._paep_stop.set()
+        try:
+            self._paep_thread.join(timeout=1.0)
+        except Exception:
+            pass
+        self._paep_thread = None
+
     def _wrench_poll_thread(self):
         """Poll env.latest_left_robot_tcp_wrench at control_fps and push into deque."""
         dt = self.control_interval_time  # 1/control_fps
@@ -831,12 +877,6 @@ class RealRunner:
             if w is not None:
                 ww = np.asarray(w, dtype=np.float32).reshape(-1)[:6]
                 self._wrench_dense_buf.append(ww)
-
-                # ---- Fz log at control_fps ----
-                self._fz_dense_t.append(time.time())
-                self._fz_dense_step.append(int(self._fz_dense_ctr))
-                self._fz_dense.append(float(ww[2]))  # index 2 => Fz
-                self._fz_dense_ctr += 1
 
 
             precise_sleep(max(0.0, dt - (time.time() - t0)))
@@ -887,6 +927,123 @@ class RealRunner:
             start = end - (L - 1)
             out[i] = np.stack(buf[start:end + 1], axis=0)
         return out
+    
+    def _inject_paep_cache_for_diffusion(self, obs_dict: Dict, device):
+        """
+        Inject cached PAEP (control-fps) into obs_dict for diffusion (inference-fps).
+        Adds:
+        - obs_dict["paep_p_phase"]   shape (1, To, E)
+        - obs_dict["paep_p_contact"] shape (1, To, 1)
+
+        NOTE:
+        - PAEP outputs are probabilities => MUST be floating dtype.
+        - NEVER match external_img dtype (often uint8), otherwise probs get cast to uint8 and destroyed.
+        """
+        try:
+            # infer To from stable keys
+            if "external_img" in obs_dict:
+                To = int(obs_dict["external_img"].shape[1])
+            elif "left_robot_tcp_wrench" in obs_dict:
+                To = int(obs_dict["left_robot_tcp_wrench"].shape[1])
+            else:
+                _k0 = next(iter(obs_dict.keys()))
+                To = int(obs_dict[_k0].shape[1])
+
+            with self._paep_cache_lock:
+                pc_raw = self._fast_paep_p_contact
+                pp = None if (self._fast_paep_p_phase is None) else np.asarray(self._fast_paep_p_phase, dtype=np.float32).reshape(-1)
+
+            if (pc_raw is None) or (pp is None):
+                raise RuntimeError("paep cache not ready")
+
+            pc = float(pc_raw)
+            if not np.isfinite(pc):
+                raise RuntimeError(f"paep pc not finite: {pc}")
+
+            E = int(pp.shape[0])
+
+            paep_phase_seq = np.broadcast_to(pp[None, None, :], (1, To, E)).astype(np.float32)  # (1,To,E)
+            paep_contact_seq = np.full((1, To, 1), pc, dtype=np.float32)                         # (1,To,1)
+
+            # ---- choose FLOAT dtype for PAEP tensors ----
+            # prefer matching other float modalities (e.g., wrench) to avoid dtype mismatch inside model
+            out_dtype = None
+            if "left_robot_tcp_wrench" in obs_dict and torch.is_tensor(obs_dict["left_robot_tcp_wrench"]):
+                out_dtype = obs_dict["left_robot_tcp_wrench"].dtype
+
+            # enforce floating
+            if (out_dtype is None) or (not torch.is_floating_point(torch.empty((), dtype=out_dtype))):
+                out_dtype = torch.float32
+
+            obs_dict["paep_p_phase"] = torch.from_numpy(paep_phase_seq).to(device=device, dtype=out_dtype)
+            obs_dict["paep_p_contact"] = torch.from_numpy(paep_contact_seq).to(device=device, dtype=out_dtype)
+
+        except Exception as e:
+            logger.warning(f"[PAEP_INJECT] skipped: {repr(e)}")
+
+
+    def _inject_wrench_hist_for_diffusion(self, obs_dict: Dict, device):
+        """Inject wrench_hist (B,To,L,6) built from dense buffer into obs_dict."""
+        if not self.enable_dense_wrench_hist:
+            return
+        try:
+            To = int(obs_dict["left_robot_tcp_wrench"].shape[1]) if "left_robot_tcp_wrench" in obs_dict else int(self.n_obs_steps)
+            wh = self._build_wrench_hist_from_dense(To=To)
+            if wh is None:
+                return
+            wh_t = torch.from_numpy(wh).unsqueeze(0).to(device=device)
+            if getattr(self, "debug_zero_wrench_hist", False):
+                obs_dict["wrench_hist"] = torch.zeros_like(wh_t)
+            else:
+                obs_dict["wrench_hist"] = wh_t
+        except Exception as e:
+            logger.warning(f"[WRENCH_HIST] build/inject failed: {e}")
+
+    def _log_ctrl_fz_and_paep(self, control_step: int):
+        """Log Fz + PAEP at *control_fps*, aligned to action_command_thread."""
+        # --- wrench / Fz ---
+        fz = float("nan")
+        try:
+            if self.enable_dense_wrench_hist and (len(self._wrench_dense_buf) > 0):
+                w = np.asarray(self._wrench_dense_buf[-1], dtype=np.float32).reshape(-1)[:6]
+                fz = float(w[2])
+        except Exception:
+            pass
+
+        self._fz_dense.append(np.float32(fz))
+        self._fz_dense_t.append(np.float64(time.time()))
+        self._fz_dense_step.append(np.int32(control_step))
+
+        # --- PAEP snapshot (compact) ---
+        try:
+            with self._paep_cache_lock:
+                pc = self._fast_paep_p_contact
+                pp = self._fast_paep_p_phase
+
+            with self._phase_lock:
+                phase_id = self._latest_phase_id
+
+            rec = {
+                "control_step": int(control_step),
+                "phase_id": None if phase_id is None else int(phase_id),
+                "p_contact": None if pc is None else float(pc),
+            }
+
+            if pp is not None:
+                pp = np.asarray(pp, dtype=np.float32).reshape(-1)
+                if pp.size > 0:
+                    k = 2 if pp.size >= 2 else 1
+                    idx = np.argpartition(pp, -k)[-k:]
+                    idx = idx[np.argsort(pp[idx])[::-1]]
+                    rec["p_phase_top_idx"] = [int(i) for i in idx.tolist()]
+                    rec["p_phase_top_val"] = [float(pp[i]) for i in idx.tolist()]
+                    p = np.clip(pp, 1e-8, 1.0)
+                    rec["p_phase_entropy"] = float(-(p * np.log(p)).sum())
+
+            self._dbg("paep_ctrl", **rec)
+        except Exception:
+            pass
+
 
 
 
@@ -908,7 +1065,8 @@ class RealRunner:
 
             if self._fz_run_ts is None:
                 self._fz_run_ts = _now_timestamp()
-            self._fz_run_dir = _make_fz_run_dir(self.output_dir, self.policy_name, self._fz_run_ts)
+            self._fz_run_dir = _make_fz_run_dir(self.output_dir, self.task_name, self.policy_name, self._fz_run_ts)
+
             logger.info(f"[FZ] logging to: {self._fz_run_dir}")
 
             time.sleep(2)
@@ -945,8 +1103,13 @@ class RealRunner:
 
                 if self.enable_fast and (self._fast is not None):
                     self._fast.reset()
+
+                with self._paep_cache_lock:
                     self._fast_paep_p_contact = None
                     self._fast_paep_p_phase = None
+                with self._phase_lock:
+                    self._latest_phase_id = None
+
 
 
                 if self.enable_video_recording:
@@ -959,12 +1122,28 @@ class RealRunner:
 
                 # ---- start 24Hz wrench polling thread (for dense wrench_hist) ----
                 self._start_dense_wrench_polling()
+
+                # ---- start PAEP control-fps polling thread ----
+                # device is already defined in your rollout (same as diffusion uses)
+                self._start_paep_polling(policy, device)
                 
                 self._fz_dense.clear()
                 self._fz_dense_t.clear()
                 self._fz_dense_step.clear()
                 self._fz_dense_ctr = 0
+                self._dbg_buf = []
 
+                # ---- wait PAEP cache ready (avoid first few steps having no PAEP for diffusion/fast) ----
+                t_wait0 = time.time()
+                while True:
+                    with self._paep_cache_lock:
+                        ok = (self._fast_paep_p_contact is not None) and (self._fast_paep_p_phase is not None)
+                    if ok:
+                        break
+                    if time.time() - t_wait0 > 2.0:
+                        logger.warning("[PAEP] cache still not ready after 2s; continue anyway")
+                        break
+                    time.sleep(0.01)
 
 
                 time.sleep(0.5)
@@ -993,18 +1172,7 @@ class RealRunner:
 
                         np_obs_dict = dict(obs)
 
-                        # if step_count == 0:
-                        #     for k in ["external_img", "left_wrist_img"]:
-                        #         if k in np_obs_dict:
-                        #             x = np.asarray(np_obs_dict[k])
-                        #             logger.info(
-                        #                 f"[RAW_IMG] {k}: dtype={x.dtype} shape={x.shape} "
-                        #                 f"min={x.min()} max={x.max()} mean={x.mean():.4f}"
-                        #             )
-
-                    
-
-                        np_obs_dict = get_real_obs_dict(env_obs=np_obs_dict, shape_meta=self.shape_meta)
+                        np_obs_dict = get_real_obs_dict(env_obs=np_obs_dict, shape_meta=self.shape_meta, bgr_to_rgb=True)
 
                         # if step_count == 0:
                         #     for k in ["external_img", "left_wrist_img"]:
@@ -1018,162 +1186,70 @@ class RealRunner:
                         np_obs_dict, np_absolute_obs_dict = self.pre_process_obs(np_obs_dict)
 
                         obs_dict = dict_apply(np_obs_dict, lambda x: torch.from_numpy(x).unsqueeze(0).to(device=device))
+                        
+                        self._inject_wrench_hist_for_diffusion(obs_dict, device=device)
 
-                        # ---- inject wrench_hist (B,To,L,6) for training/deploy consistency ----
-                        if self.enable_dense_wrench_hist:
-                            try:
-                                To = int(obs_dict["left_robot_tcp_wrench"].shape[1]) if "left_robot_tcp_wrench" in obs_dict else int(self.n_obs_steps)
-                                wh = self._build_wrench_hist_from_dense(To=To)
-                                if wh is not None:
-                                    wh_t = torch.from_numpy(wh).unsqueeze(0).to(device=device)
-                                    if getattr(self, "debug_zero_wrench_hist", False):
-                                        obs_dict["wrench_hist"] = torch.zeros_like(wh_t)
-                                    else:
-                                        obs_dict["wrench_hist"] = wh_t
-
-                            except Exception as e:
-                                logger.warning(f"[WRENCH_HIST] build/inject failed: {e}")
+                        self._inject_paep_cache_for_diffusion(obs_dict, device=device)
 
                         with torch.no_grad():
-                            if self.use_latent_action_with_rnn_decoder:
-                                action_dict = policy.predict_action(
-                                    obs_dict,
-                                    dataset_obs_temporal_downsample_ratio=self.dataset_obs_temporal_downsample_ratio,
-                                    return_latent_action=True,
-                                )
-                            else:
-                                action_dict = policy.predict_action(obs_dict)
+                            with self._policy_infer_lock:
+                                if self.use_latent_action_with_rnn_decoder:
+                                    action_dict = policy.predict_action(
+                                        obs_dict,
+                                        dataset_obs_temporal_downsample_ratio=self.dataset_obs_temporal_downsample_ratio,
+                                        return_latent_action=True,
+                                    )
+                                else:
+                                    action_dict = policy.predict_action(obs_dict)
+
 
                         np_action_dict = dict_apply(action_dict, lambda x: x.detach().to("cpu").numpy())
 
-                        # # ---- DBG: how much force residual is injected into vision ----
-                        # if (infer_step % 1) == 0:
-                        #     try:
-                        #         # try multiple possible paths to find fusion module
-                        #         fusion = None
-                        #         for cand in ["fusion", "model.fusion", "net.fusion", "policy.fusion"]:
-                        #             obj = policy
-                        #             ok = True
-                        #             for part in cand.split("."):
-                        #                 if not hasattr(obj, part):
-                        #                     ok = False
-                        #                     break
-                        #                 obj = getattr(obj, part)
-                        #             if ok:
-                        #                 fusion = obj
-                        #                 break
+                        # ---- record fusion/attn/policy-stash at inference_fps (+ PAEP snapshot used by diffusion) ----
+                        try:
+                            d = extract_fusion_debug(policy)  # JSON-serializable
 
-                        #         if fusion is None:
-                        #             logger.info("[DBG][FUSION] fusion module not found on policy (tried fusion/model.fusion/net.fusion/policy.fusion)")
-                        #         else:
-                        #             dd = getattr(fusion, "_last_fusion_debug", None)
-                        #             if dd is None:
-                        #                 logger.info("[DBG][FUSION] fusion._last_fusion_debug is None (fusion found, but debug not produced)")
-                        #             else:
-                        #                 def _to_float(x, default=float("nan")):
-                        #                     try:
-                        #                         if x is None:
-                        #                             return float(default)
-                        #                         if torch.is_tensor(x):
-                        #                             x = x.detach()
-                        #                             if x.numel() == 1:
-                        #                                 return float(x.cpu().item())
-                        #                             # fallback: mean
-                        #                             return float(x.float().mean().cpu().item())
-                        #                         return float(x)
-                        #                     except Exception:
-                        #                         return float(default)
+                            # snapshot PAEP cache at this inference moment
+                            with self._paep_cache_lock:
+                                pc_snap = self._fast_paep_p_contact
+                                pp_snap = self._fast_paep_p_phase
 
-                        #                 # ---- pull numbers from fusion debug dict (your fusion stores these keys) ----
-                        #                 import math
+                            if pc_snap is not None:
+                                d["paep_cache/p_contact"] = float(pc_snap)
 
-                        #                 def _to_float_or_none(x):
-                        #                     try:
-                        #                         if x is None:
-                        #                             return None
-                        #                         if torch.is_tensor(x):
-                        #                             x = x.detach()
-                        #                             if x.numel() == 1:
-                        #                                 return float(x.cpu().item())
-                        #                             return float(x.float().mean().cpu().item())
-                        #                         return float(x)
-                        #                     except Exception:
-                        #                         return None
-
-                        #                 def _fmt(name, val, fmt=".3f"):
-                        #                     if val is None or (isinstance(val, float) and math.isnan(val)):
-                        #                         return f"{name}=NA"
-                        #                     return f"{name}={val:{fmt}}"
-
-                        #                 # ✅（可选）第一次打印 fusion debug keys，确认有哪些字段
-                        #                 if not hasattr(self, "_dbg_fusion_keys_once"):
-                        #                     self._dbg_fusion_keys_once = True
-                        #                     try:
-                        #                         logger.info(f"[DBG][FUSION_KEYS] {sorted(list(dd.keys()))}")
-                        #                         self.paep_logger.info(f"[DBG][FUSION_KEYS] {sorted(list(dd.keys()))}")
-                        #                     except Exception:
-                        #                         pass
-
-                        #                 # ✅只读 fusion 真实提供的 key（见 dual_gated_v_f_fusion_v4.py）
-                        #                 alpha         = _to_float_or_none(dd.get("alpha"))
-                        #                 g_contact     = _to_float_or_none(dd.get("g_contact_mean"))
-                        #                 g_head        = _to_float_or_none(dd.get("g_head_mean"))
-
-                        #                 v_norm_mean   = _to_float_or_none(dd.get("v_norm_mean"))
-                        #                 inj_norm_mean = _to_float_or_none(dd.get("inj_norm_mean"))
-
-                        #                 # ✅强烈建议用 fusion 直接算好的 inj_over_v_mean（更稳）
-                        #                 inj_over_v    = _to_float_or_none(dd.get("inj_over_v_mean"))
-
-                        #                 # ✅注意 key 名：fusion 里是 cos_vd_mean，不是 cos_v_delta_mean
-                        #                 cos_vd_mean   = _to_float_or_none(dd.get("cos_vd_mean"))
-
-                        #                 # （可选）如果你未来把这些字段也写进 fusion，这里再读；否则保持 NA
-                        #                 d_norm_mean   = _to_float_or_none(dd.get("delta_norm_mean"))
-                        #                 scale_mean    = _to_float_or_none(dd.get("scale_mean"))
-
-                        #                 dbg_msg = (
-                        #                     f"infer_step={infer_step} step={step_count} "
-                        #                     + _fmt("alpha", alpha, ".4f") + " "
-                        #                     + _fmt("g_contact", g_contact, ".3f") + " "
-                        #                     + _fmt("g_head", g_head, ".3f") + " "
-                        #                     + _fmt("v_norm", v_norm_mean, ".3f") + " "
-                        #                     + _fmt("inj_norm", inj_norm_mean, ".3f") + " "
-                        #                     + _fmt("inj_over_v", inj_over_v, ".3f") + " "
-                        #                     + _fmt("cos_vd", cos_vd_mean, ".3f") + " "
-                        #                     + _fmt("delta_norm", d_norm_mean, ".3f") + " "
-                        #                     + _fmt("scale", scale_mean, ".4f")
-                        #                 )
-
-                        #                 logger.info("[DBG][FUSION] " + dbg_msg)
-                        #                 self.paep_logger.info("[DBG][FUSION] " + dbg_msg)
-                        #                 for h in self.paep_logger.handlers:
-                        #                     try:
-                        #                         h.flush()
-                        #                     except Exception:
-                        #                         pass
-
-                            # except Exception as e:
-                            #     logger.warning(f"[DBG][FUSION] failed to read fusion debug: {e}")
-                            #     try:
-                            #         self.paep_logger.info(f"[DBG][FUSION] failed to read fusion debug: {e}")
-                            #         for h in self.paep_logger.handlers:
-                            #             try:
-                            #                 h.flush()
-                            #             except Exception:
-                            #                 pass
-                            #     except Exception:
-                            #         pass
+                            # keep PAEP snapshot compact (avoid storing full vector at inference_fps)
+                            if pp_snap is not None:
+                                try:
+                                    pp = np.asarray(pp_snap, dtype=np.float32).reshape(-1)
+                                    if pp.size > 0:
+                                        k = 2 if pp.size >= 2 else 1
+                                        idx = np.argpartition(pp, -k)[-k:]
+                                        idx = idx[np.argsort(pp[idx])[::-1]]
+                                        d["paep_cache/p_phase_top_idx"] = [int(i) for i in idx.tolist()]
+                                        d["paep_cache/p_phase_top_val"] = [float(pp[i]) for i in idx.tolist()]
+                                except Exception:
+                                    pass
 
 
+                            self._dbg(
+                                "fusion_infer",
+                                infer_step=int(infer_step),
+                                control_step=int(step_count),
+                                **d
+                            )
+                        except Exception:
+                            pass
 
+
+                    
                         # --- PAEP phase logging (policy v4) ---
+                        # IMPORTANT:
+                        #   PAEP cache for fast/diffusion is updated ONLY by the control-fps PAEP polling thread.
+                        #   Do NOT write self._fast_paep_p_contact / self._fast_paep_p_phase here (avoid double-writer / redundancy).
                         if "paep_phase_id" in np_action_dict:
                             phase_id = int(np.array(np_action_dict["paep_phase_id"]).reshape(-1)[0])
-                            
-                            with self._phase_lock:
-                                self._latest_phase_id = phase_id
 
+                            # optional: still parse these for logging (no cache write)
                             conf = float("nan")
                             if "paep_phase_conf" in np_action_dict:
                                 conf = float(np.array(np_action_dict["paep_phase_conf"]).reshape(-1)[0])
@@ -1182,19 +1258,9 @@ class RealRunner:
                             if "paep_g_contact" in np_action_dict:
                                 g = float(np.array(np_action_dict["paep_g_contact"]).reshape(-1)[0])
 
-                            # ---- contact prob (cache for fast) ----
-                            pc = float("nan")
-                            if "paep_p_contact" in np_action_dict:
-                                pc = float(np.array(np_action_dict["paep_p_contact"]).reshape(-1)[0])
-                                if getattr(self, "enable_fast", False):
-                                    self._fast_paep_p_contact = pc
+                            # (optional) if you want, keep a small debug stash
+                            self._last_paep_debug = {"phase_id": phase_id, "phase_conf": conf, "g_contact": g}
 
-                            # ---- phase prob vector (cache for fast, every infer step) ----
-                            p = None
-                            if "paep_p_phase" in np_action_dict:
-                                p = np.array(np_action_dict["paep_p_phase"]).reshape(-1, 3)[0].astype(np.float32)
-                                if getattr(self, "enable_fast", False):
-                                    self._fast_paep_p_phase = p
 
                             # # ---- log (keep 10-step frequency) ----
                             # if (infer_step % 10) == 0 and (p is not None):
@@ -1361,42 +1427,70 @@ class RealRunner:
                 except KeyboardInterrupt:
                     logger.warning("KeyboardInterrupt! Terminate the episode now!")
                 finally:
-                    self.stop_event.set()
-                    # ---- stop 24Hz wrench polling thread ----
-                    self._stop_dense_wrench_polling()
+                    # 1) stop threads FIRST to avoid concurrent writes during dumping
+                    try:
+                        self.stop_event.set()   # ✅ stop action_command_thread
+                    except Exception:
+                        pass
 
+                    try:
+                        self._stop_paep_polling()          # ✅ stop PAEP control-fps thread
+                    except Exception:
+                        pass
 
-                    csv_path = osp.join(self._fz_run_dir, f"episode_{episode_idx:03d}_left_tcp_fz.csv")
-                    meta_path = osp.join(self._fz_run_dir, f"episode_{episode_idx:03d}_left_tcp_fz_meta.json")
-                    npy_path = osp.join(self._fz_run_dir, f"episode_{episode_idx:03d}_left_tcp_fz.npy")
+                    try:
+                        self._stop_dense_wrench_polling()  # ✅ stop wrench polling thread
+                    except Exception:
+                        pass
 
-                    np.save(npy_path, np.asarray(self._fz_dense, dtype=np.float32))
+                    # join action thread (now it should exit quickly)
+                    try:
+                        action_thread.join(timeout=2.0)
+                        if action_thread.is_alive():
+                            logger.warning("[ACTION_THREAD] still alive after join timeout; continue teardown.")
+                    except Exception:
+                        pass
 
-                    with open(csv_path, "w", newline="") as f:
-                        w = csv.writer(f)
-                        w.writerow(["wall_time", "control_step", "fz"])
-                        for t, s, z in zip(self._fz_dense_t, self._fz_dense_step, self._fz_dense):
-                            w.writerow([t, s, z])
+                    # 2) now dump ONE file per episode: Fz(control_fps) + PAEP(control_fps) + fusion(inference_fps)
+                    debug_npz_path = osp.join(self._fz_run_dir, f"episode_{episode_idx:03d}_debug_all.npz")
 
-                    meta = {
-                        "policy": self.policy_name,
-                        "run_timestamp": self._fz_run_ts,
-                        "episode_idx": episode_idx,
-                        "control_fps": self.control_fps,
-                        "csv_path": csv_path,
-                        "npy_path": npy_path,
-                        "step": self._fz_dense_step,
-                        "n": len(self._fz_dense),
-                        "source": "control-fps polling in _wrench_poll_thread; Fz = latest_left_robot_tcp_wrench[2]",
-                    }
-                    with open(meta_path, "w") as f:
-                        json.dump(meta, f, indent=2)
+                    # make local snapshot to avoid any residual races
+                    try:
+                        fz_arr = np.asarray(self._fz_dense, dtype=np.float32)
+                        fz_t_arr = np.asarray(self._fz_dense_t, dtype=np.float64)
+                        fz_step_arr = np.asarray(self._fz_dense_step, dtype=np.int32)
+                        dbg_snapshot = list(getattr(self, "_dbg_buf", []))
+                    except Exception:
+                        fz_arr = np.asarray([], dtype=np.float32)
+                        fz_t_arr = np.asarray([], dtype=np.float64)
+                        fz_step_arr = np.asarray([], dtype=np.int32)
+                        dbg_snapshot = []
 
-                    logger.info(f"[FZ] saved(control_fps): {csv_path} (+ npy/meta)")
+                    paep_ctrl = [r for r in dbg_snapshot if r.get("tag") == "paep_ctrl"]
+                    fusion_infer = [r for r in dbg_snapshot if r.get("tag") == "fusion_infer"]
 
+                    np.savez_compressed(
+                        debug_npz_path,
+                        # ---- Fz at control_fps ----
+                        fz=fz_arr,
+                        fz_wall_time=fz_t_arr,
+                        fz_control_step=fz_step_arr,
 
+                        # ---- PAEP at control_fps (dict list) ----
+                        paep_ctrl=np.asarray(paep_ctrl, dtype=object),
 
-                    # ---- ask user to label episode success/failure (for later grouping cos stats) ----
+                        # ---- fusion at inference_fps (dict list) ----
+                        fusion_infer=np.asarray(fusion_infer, dtype=object),
+
+                        # ---- meta ----
+                        control_fps=np.asarray([self.control_fps], dtype=np.int32),
+                        inference_fps=np.asarray([self.inference_fps], dtype=np.int32),
+                        episode_idx=np.asarray([episode_idx], dtype=np.int32),
+                    )
+
+                    logger.info(f"[DBG] saved: {debug_npz_path} (fz+paep_ctrl+fusion_infer)")
+
+                    # ---- ask user to label episode success/failure (optional) ----
                     try:
                         episode_success = py_cli_interaction.parse_cli_bool(
                             "Was this episode successful? (y/n)",
@@ -1405,14 +1499,22 @@ class RealRunner:
                     except Exception:
                         episode_success = None
 
-                
-
-                    action_thread.join()
-
                     if self.enable_video_recording:
                         self.stop_record_video()
                     self.env.save_exp(episode_idx)
 
+
         finally:
-            self.env.destroy_node()
-# ====== END ======
+            try:
+                executor.shutdown()
+            except Exception:
+                pass
+            try:
+                self.env.destroy_node()
+            except Exception:
+                pass
+            try:
+                rclpy.shutdown()
+            except Exception:
+                pass
+

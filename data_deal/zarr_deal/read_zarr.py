@@ -2,7 +2,7 @@ import zarr
 import numpy as np
 
 # 路径按你的实际情况改
-zarr_path = "/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/dataset/plug_in_stream_downsample1_zarr/replay_buffer.zarr/data"
+zarr_path = "/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/dataset/plug_in_charger/plug_in_charger_stream_downsample1_zarr/replay_buffer.zarr/data"
 
 # 打开 zarr（只读）
 root = zarr.open(zarr_path, mode="r")

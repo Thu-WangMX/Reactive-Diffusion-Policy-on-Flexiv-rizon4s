@@ -235,6 +235,7 @@ class RealRobotEnvironment(Node):
 
     # @pyinstrument.profile()
     def callback(self, *msgs):
+        #logger.info(f"[SYNC] got msgs: {len(msgs)}")
         topic_dict = dict()
         for i, msg in enumerate(msgs):
             topic_name = self.subscribers[i].topic

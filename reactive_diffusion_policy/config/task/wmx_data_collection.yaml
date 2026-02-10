@@ -14,7 +14,7 @@ teleop_server:
   # teleoperation mode
   teleop_mode: 'left_arm_6DOF'
   #teleop_mode: 'left_arm_3D_translation_Z_rotation' # wiping board
-  relative_translation_scale: 1.0  # for dexterous teleoperation
+  relative_translation_scale: 0.5  # for dexterous teleoperation
   bimanual_teleop: &bimanual_teleop False
 
 robot_server:
@@ -70,7 +70,7 @@ publisher:
 
   # # USB camera (GelSight)
   usb_camera_publisher:
-    - camera_name: 'left_gripper_camera_1'
+    - camera_name: 'left_gripper_robotcamera_1'
       camera_type: 'gelsight'
       fps: 24
       vr_server_ip: ${task.publisher.vr_server_ip}

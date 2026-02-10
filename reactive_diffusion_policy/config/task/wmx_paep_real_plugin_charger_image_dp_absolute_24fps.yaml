@@ -55,9 +55,9 @@ env_runner:
   # action_smoothing_alpha: 0.5
   # smooth_xyz_only: true
 
-  tcp_action_update_interval: 6
+  tcp_action_update_interval: 8
   #gripper_action_update_interval: 6
-  gripper_action_update_interval: 6
+  gripper_action_update_interval: 8
   # tcp_action_update_interval: 2
   # gripper_action_update_interval: 2
   tcp_pos_clip_range:
@@ -71,16 +71,18 @@ env_runner:
   # control_fps: 12        # DP 控制频率
   control_fps: 24        # 修改
   #inference_fps: 6
-  inference_fps: 8 #每 3 个 control step 推理一次
+  inference_fps: 6 #每 3 个 control step 推理一次
   n_obs_steps: ${n_obs_steps}
   obs_temporal_downsample_ratio: 2
   task_name: ${task_name}
   transform_params: ${task.transforms}
   shape_meta: *shape_meta
   tcp_ensemble_buffer_params:
-    ensemble_mode: 'new'
+    ensemble_mode: 'hato'
+    tau: 0.95
   gripper_ensemble_buffer_params:
-    ensemble_mode: 'new'
+    ensemble_mode: 'hato'
+    tau: 0.9
   use_relative_action: ${task.dataset.relative_action}
   action_interpolation_ratio: 1
   enable_video_recording: False

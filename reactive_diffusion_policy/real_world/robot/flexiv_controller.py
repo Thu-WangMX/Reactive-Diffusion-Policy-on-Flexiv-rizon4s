@@ -222,135 +222,110 @@ class FlexivController:
         return q
             
 
-    # def tcp_move(self, target_tcp, phase_id=None):
+    def tcp_move(self, target_tcp, phase_id=None):
 
-    #     # 四元数顺序：w,x,y,z
-    #     # target_tcp = np.asarray(target_tcp, dtype=np.float64)
-    #     # pos = target_tcp[:3]
-    #     # quat = target_tcp[3:7]
-    #     # quat = self.fix_quat_continuity(quat, getattr(self, "_prev_quat", None))
-    #     # self._prev_quat = quat.copy()
-    #     # target_tcp[3:7] = quat
-    #     # # target_tcp[3:] = [0.01265409 , 0.00165955,  0.99990422, -0.00534991]
+        # 四元数顺序：w,x,y,z
+        # target_tcp = np.asarray(target_tcp, dtype=np.float64)
+        # pos = target_tcp[:3]
+        # quat = target_tcp[3:7]
+        # quat = self.fix_quat_continuity(quat, getattr(self, "_prev_quat", None))
+        # self._prev_quat = quat.copy()
+        # target_tcp[3:7] = quat
+        # # target_tcp[3:] = [0.01265409 , 0.00165955,  0.99990422, -0.00534991]
 
+            # phase_id 接收但不使用（保持接口兼容）
+        _ = phase_id
+
+        # 正常调用：目标扳手为 0（纯运动模式）
+        self.robot.SendCartesianMotionForce(
+            target_tcp,
+            [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            0.2
+        )
+        print("机械臂执行一次tcp_move")
+
+    # def tcp_move(self, target_tcp, phase_id=None): #擦白板
     #     # phase_id 统一为 int 或 None
     #     try:
     #         phase = None if phase_id is None else int(phase_id)
     #     except Exception:
     #         phase = None
+        
 
-    #     # === phase == 1: 开启底层力控（仅 Z 轴）===
-    #     if phase == 1:
-    #         # 以 TCP 坐标系作为力控参考系
+    #     # hard rule: no phase_id -> never enable force control
+    #     if phase is None:
+            
+    #         self.robot.SendCartesianMotionForce(target_tcp, [0.0] * 6, 0.1)
+
+    #         return
+
+
+    #     # ----------------------------
+    #     # phase 去抖 + 开关力控逻辑
+    #     # ----------------------------
+    #     if not self._fc_on:
+    #         # OFF -> ON：需要 phase=1 “稳定出现”累计 >=15
+    #         # phase=2 允许夹杂，不打断计数；其它 phase 打断计数
+    #         if phase == 1:
+    #             self._p1_streak += 1
+    #         elif phase == 2:
+    #             # 允许夹杂：不增加p1_streak，也不清零
+    #             pass
+    #         else:
+    #             self._p1_streak = 0
+
+    #         # 进入力控前，phase=2 连续计数也没意义，重置
+    #         self._p2_run = 0
+
+    #         if self._p1_streak >= self.FC_ENTER_STREAK:
+    #             self._fc_on = True
+    #             self._p2_run = 0  # 进入力控后重新开始统计 phase2 连续段
+
+    #     else:
+    #         # ON 保持：phase=1 继续保持；phase=2 视为毛刺，但连续>=10则退出
+    #         if phase == 2:
+    #             self._p2_run += 1
+    #             if self._p2_run >= self.FC_P2_OFF_CONSEC:
+    #                 # phase2 连续太久：关力控
+    #                 self._fc_on = False
+    #                 self._p1_streak = 0
+    #                 self._p2_run = 0
+    #         else:
+    #             # 只要不是 phase=2，就清掉 phase2 连续计数
+    #             self._p2_run = 0
+
+    #             # 如果 phase 不是1（比如0/None/3...），你希望是否立即关？
+    #             # 这里我选择：非1非2 也关（更安全）。如果你不想立刻关，把下面两行删掉。
+    #             if phase not in (1, 2):
+    #                 self._fc_on = False
+    #                 self._p1_streak = 0
+
+    #     # ----------------------------
+    #     # 执行力控 / 非力控i
+    #     # ----------------------------
+
+    #     if self._fc_on:
     #         self.robot.SetForceControlFrame(flexivrdk.CoordType.TCP)
-    #         # 仅控制 Z 方向力，其它自由度不做力控（仍由运动控制）
     #         self.robot.SetForceControlAxis([False, False, True, False, False, False])
-    #         # 不限制接触力矩/力（你也可以改成更安全的阈值）
     #         self.robot.SetMaxContactWrench([float("inf")] * 6)
-
-    #         # 发送带 Z 方向恒定目标力的笛卡尔运动（负号表示向下压）
     #         self.robot.SendCartesianMotionForce(
     #             target_tcp,
-    #             [0.0, 0.0, -10.0, 0.0, 0.0, 0.0],  # 你想要的法向目标力
-    #             0.1  # 这个参数你之前用过 0.05
+    #             [0.0, 0.0, float(self.FC_TARGET_FZ), 0.0, 0.0, 0.0],
+    #             0.05
     #         )
-    #         print(f"[tcp_move] phase={phase} -> FORCE_CTRL_ON ") #target_tcp={target_tcp}
-
-    #     # === 其它 phase: 不开启底层力控 ===
+    #         print(f"[tcp_move] raw_phase={phase} -> FORCE_CTRL_ON "
+    #             f"(p1_streak={self._p1_streak}, p2_run={self._p2_run})")
     #     else:
     #         self.robot.SetForceControlFrame(flexivrdk.CoordType.TCP)
-    #         # 显式关闭力控轴（避免上一阶段残留）
     #         self.robot.SetForceControlAxis([False, False, False, False, False, False])
     #         self.robot.SetMaxContactWrench([float("inf")] * 6)
-
     #         self.robot.SendCartesianMotionForce(
     #             target_tcp,
     #             [0.0] * 6,
-    #             0.1
+    #             0.08
     #         )
-    #         print(f"[tcp_move] phase={phase} -> FORCE_CTRL_OFF ") #target_tcp={target_tcp}
-    def tcp_move(self, target_tcp, phase_id=None):
-        # phase_id 统一为 int 或 None
-        try:
-            phase = None if phase_id is None else int(phase_id)
-        except Exception:
-            phase = None
-        
-
-        # hard rule: no phase_id -> never enable force control
-        if phase is None:
-            
-            self.robot.SendCartesianMotionForce(target_tcp, [0.0] * 6, 0.2)
-
-            return
-
-
-        # # ----------------------------
-        # # phase 去抖 + 开关力控逻辑
-        # # ----------------------------
-        # if not self._fc_on:
-        #     # OFF -> ON：需要 phase=1 “稳定出现”累计 >=15
-        #     # phase=2 允许夹杂，不打断计数；其它 phase 打断计数
-        #     if phase == 1:
-        #         self._p1_streak += 1
-        #     elif phase == 2:
-        #         # 允许夹杂：不增加p1_streak，也不清零
-        #         pass
-        #     else:
-        #         self._p1_streak = 0
-
-        #     # 进入力控前，phase=2 连续计数也没意义，重置
-        #     self._p2_run = 0
-
-        #     if self._p1_streak >= self.FC_ENTER_STREAK:
-        #         self._fc_on = True
-        #         self._p2_run = 0  # 进入力控后重新开始统计 phase2 连续段
-
-        # else:
-        #     # ON 保持：phase=1 继续保持；phase=2 视为毛刺，但连续>=10则退出
-        #     if phase == 2:
-        #         self._p2_run += 1
-        #         if self._p2_run >= self.FC_P2_OFF_CONSEC:
-        #             # phase2 连续太久：关力控
-        #             self._fc_on = False
-        #             self._p1_streak = 0
-        #             self._p2_run = 0
-        #     else:
-        #         # 只要不是 phase=2，就清掉 phase2 连续计数
-        #         self._p2_run = 0
-
-        #         # 如果 phase 不是1（比如0/None/3...），你希望是否立即关？
-        #         # 这里我选择：非1非2 也关（更安全）。如果你不想立刻关，把下面两行删掉。
-        #         if phase not in (1, 2):
-        #             self._fc_on = False
-        #             self._p1_streak = 0
-
-        # # ----------------------------
-        # # 执行力控 / 非力控
-        # # ----------------------------
-
-        # if self._fc_on:
-        #     self.robot.SetForceControlFrame(flexivrdk.CoordType.TCP)
-        #     self.robot.SetForceControlAxis([False, False, True, False, False, False])
-        #     self.robot.SetMaxContactWrench([float("inf")] * 6)
-        #     self.robot.SendCartesianMotionForce(
-        #         target_tcp,
-        #         [0.0, 0.0, float(self.FC_TARGET_FZ), 0.0, 0.0, 0.0],
-        #         0.05
-        #     )
-        #     print(f"[tcp_move] raw_phase={phase} -> FORCE_CTRL_ON "
-        #         f"(p1_streak={self._p1_streak}, p2_run={self._p2_run})")
-        # else:
-        #     self.robot.SetForceControlFrame(flexivrdk.CoordType.TCP)
-        #     self.robot.SetForceControlAxis([False, False, False, False, False, False])
-        #     self.robot.SetMaxContactWrench([float("inf")] * 6)
-        #     self.robot.SendCartesianMotionForce(
-        #         target_tcp,
-        #         [0.0] * 6,
-        #         0.08
-        #     )
-        #     print(f"[tcp_move] raw_phase={phase} -> FORCE_CTRL_OFF "
-        #         f"(p1_streak={self._p1_streak}, p2_run={self._p2_run})")
+    #         print(f"[tcp_move] raw_phase={phase} -> FORCE_CTRL_OFF "
+    #             f"(p1_streak={self._p1_streak}, p2_run={self._p2_run})")
 
 
         

@@ -21,6 +21,39 @@ from paep_model import PAEPFutureNet
 CFG_PATH = "/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/PAEP/config/paep_plug_in_charger.py"
 #CFG_PATH = "/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/PAEP/config/paep_wiping_board.py"
 
+def atomic_torch_save(obj, path: str):
+    tmp = path + ".tmp"
+    torch.save(obj, tmp)
+    os.replace(tmp, path)  # atomic rename on POSIX
+
+
+
+def _state_dict_to_cpu(state_dict):
+    # 把所有 Tensor 移到 CPU，避免 atomic_torch_save 触发 GPU 同步卡顿
+    cpu_sd = {}
+    for k, v in state_dict.items():
+        if torch.is_tensor(v):
+            cpu_sd[k] = v.detach().cpu()
+        else:
+            cpu_sd[k] = v
+    return cpu_sd
+
+
+def _move_ckpt_tensors_to_cpu(obj):
+    """
+    递归把 ckpt dict/list/tuple 里的 torch.Tensor 全部搬到 CPU。
+    保险起见：防止你以后往 ckpt 里塞了 phase_w / norm_torch 之类的 GPU tensor。
+    """
+    if torch.is_tensor(obj):
+        return obj.detach().cpu()
+    if isinstance(obj, dict):
+        return {k: _move_ckpt_tensors_to_cpu(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        t = [_move_ckpt_tensors_to_cpu(v) for v in obj]
+        return type(obj)(t)
+    return obj
+
+
 def load_cfg(py_path: str):
     """Load a python config file as a module, return a namespace-like object."""
     py_path = os.path.abspath(py_path)
@@ -172,7 +205,7 @@ def main():
         train_ds,
         batch_size=int(cfg.BATCH_SIZE),
         shuffle=False,
-        num_workers=8,               # 先试 8；不稳就降到 4
+        num_workers=4,               # 先试 8；不稳就降到 4
         pin_memory=True,
         persistent_workers=True,     # 关键：每个 epoch 不重启 worker
         prefetch_factor=4,           # 预取更多 batch，喂饱 GPU
@@ -429,7 +462,7 @@ def main():
             patience_left -= 1
 
         ckpt = {
-            "model": model.state_dict(),
+            "model": _state_dict_to_cpu(model.state_dict()),
             "cfg": {
                 # core
                 "zarr_path": cfg.ZARR_PATH,
@@ -475,10 +508,22 @@ def main():
             },
         }
 
+        ckpt = _move_ckpt_tensors_to_cpu(ckpt)
+        # ---- save last (overwrite) ----
+        last_path = os.path.join(cfg.SAVE_DIR, "last.pt")
+        atomic_torch_save(ckpt, last_path)
 
-        torch.save(ckpt, os.path.join(cfg.SAVE_DIR, f"paep_future_ep{epoch:03d}.pt"))
+        # ---- save best (only when improved) ----
         if improved:
-            torch.save(ckpt, os.path.join(cfg.SAVE_DIR, "best.pt"))
+            best_path = os.path.join(cfg.SAVE_DIR, "best.pt")
+            atomic_torch_save(ckpt, best_path)
+
+        # ---- optional snapshots ----
+        save_every = int(getattr(cfg, "SAVE_EVERY", 0) or 0)
+        if save_every > 0 and (epoch % save_every == 0):
+            snap_path = os.path.join(cfg.SAVE_DIR, f"snapshot_ep{epoch:03d}.pt")
+            atomic_torch_save(ckpt, snap_path)
+
 
         if patience_left <= 0:
             print(f"[early-stop] No improvement for {int(cfg.EARLY_STOP_PATIENCE)} epochs. Stop at epoch {epoch}.")

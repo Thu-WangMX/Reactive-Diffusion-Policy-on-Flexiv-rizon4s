@@ -221,6 +221,21 @@ class RealRobotEnvironment(Node):
 
     # @pyinstrument.profile()
     def callback(self, *msgs):
+        #logger.info(f"[SYNC] got msgs: {len(msgs)}")
+        try:
+            stamps = []
+            for m in msgs:
+                # 大多数 ROS msg 都有 header.stamp
+                if hasattr(m, "header") and hasattr(m.header, "stamp"):
+                    s = m.header.stamp.sec + m.header.stamp.nanosec * 1e-9
+                else:
+                    s = None
+                stamps.append(s)
+            #logger.info(f"[SYNC] stamps={stamps}")
+        except Exception as e:
+            # logger.warning(f"[SYNC] stamp parse failed: {repr(e)}")
+            pass
+
         topic_dict = dict()
         for i, msg in enumerate(msgs):
             topic_name = self.subscribers[i].topic

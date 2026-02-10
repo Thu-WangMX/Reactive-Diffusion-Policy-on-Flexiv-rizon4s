@@ -28,10 +28,13 @@ try:
     print("✓ 机器人初始化完成并进入PRIMITIVE模式。")
 
 
-    position = [0.5300 ,-0.0269 , 0.30]
+    # position = [0.5300 ,-0.0269 , 0.30] 插插头擦白板的初始位置
+    position = [0.5800 ,-0.0269 , 0.25] #插usb的初始位置
     euler_degrees = [-179.1952  ,  0.2877   ,-178.6688]
+
     robot.Move_gripper(0.1, speed=0.1, force=10.0)
     robot.MoveL(position,euler_degrees, speed=0.1, acc=0.1)
+    
 
     print("完成MoveL和Movegripper")
 except Exception as e:

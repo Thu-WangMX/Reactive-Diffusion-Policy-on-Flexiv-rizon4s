@@ -8,20 +8,20 @@ from tqdm import tqdm  # 如果没有安装 tqdm，可以注释掉相关代码�
 # ================= 配置区域 (请在此修改) =================
 
 # .pkl 文件所在的文件夹路径
-DATA_DIR = '/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/dataset_pkl/plug_in_charger'
+DATA_DIR = '/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/dataset_pkl/plug_in_usb'
 
 # 起始 Episode 序号 (整数)
-START_EPISODE_ID = 13
+START_EPISODE_ID = 0
 
 # 结束 Episode 序号 (整数，包含此序号)
-END_EPISODE_ID = 20
+END_EPISODE_ID = 1
 
 # 要可视化的 Wrench 维度索引 (0=Fx, 1=Fy, 2=Fz, 3=Tx, 4=Ty, 5=Tz)
-WRENCH_AXIS_INDEX = 2 
+WRENCH_AXIS_INDEX = 1 
 WRENCH_AXIS_NAME = "Force Z"
 
 # 输出图片的保存目录 (默认在 dataset_pkl 旁边的 wrench_plots 文件夹)
-OUTPUT_DIR = '/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/dataset_pkl/plug_in_charger/wrench_plots'
+OUTPUT_DIR = '/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/dataset_pkl/plug_in_usb/wrench_plots'
 
 # ========================================================
 

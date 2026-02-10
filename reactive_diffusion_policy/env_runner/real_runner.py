@@ -624,6 +624,9 @@ class RealRunner:
                         obs = self.env.get_obs(
                             obs_steps=self.n_obs_steps,
                             temporal_downsample_ratio=self.obs_temporal_downsample_ratio)
+                        np_obs_dict = dict(obs)
+                        #logger.info(f"[OBS_KEYS] {sorted(list(np_obs_dict.keys()))}")
+                        #logger.info(f"[HAS_RIGHT_WRIST] {'right_wrist_img' in np_obs_dict}")
                         # obs = dict()
 
                         if len(obs) == 0:
@@ -712,7 +715,7 @@ class RealRunner:
                                 else:
                                     raise NotImplementedError
                             # add to ensemble buffer
-                            logger.debug(f"Step: {step_count}, Add TCP action to ensemble buffer: {tcp_action}")
+                            #logger.debug(f"Step: {step_count}, Add TCP action to ensemble buffer: {tcp_action}")
                             self.tcp_ensemble_buffer.add_action(tcp_action, step_count)
 
                             if self.env.enable_exp_recording and not self.use_latent_action_with_rnn_decoder:
@@ -733,7 +736,7 @@ class RealRunner:
                                 else:
                                     raise NotImplementedError
                             # add to ensemble buffer
-                            logger.debug(f"Step: {step_count}, Add gripper action to ensemble buffer: {gripper_action}")
+                            #logger.debug(f"Step: {step_count}, Add gripper action to ensemble buffer: {gripper_action}")
                             self.gripper_ensemble_buffer.add_action(gripper_action, step_count)
 
                             if self.env.enable_exp_recording and not self.use_latent_action_with_rnn_decoder:

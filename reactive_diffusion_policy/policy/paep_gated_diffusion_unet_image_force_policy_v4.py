@@ -137,7 +137,7 @@ class PAEPGatedDiffusionUnetImageForcePolicy(BaseImagePolicy):
         if paep_ckpt is not None:
             ckpt = torch.load(paep_ckpt, map_location="cpu", weights_only=False)
             self.paep_cfg = ckpt.get("cfg", {}) or {}
-            self.paep_num_events = int(self.paep_cfg.get("num_events", 3))
+            self.paep_num_events = int(self.paep_cfg.get("num_events", 4))
 
             # build PAEP with correct num_events (IMPORTANT!)
             self.paep = PAEPFutureNet(num_events=self.paep_num_events, img_pretrained=False)
@@ -393,6 +393,60 @@ class PAEPGatedDiffusionUnetImageForcePolicy(BaseImagePolicy):
     # ----------------------------
     # PAEP forward
     # ----------------------------
+
+    @torch.no_grad()
+    def predict_paep(self, obs_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        """
+        Run ONLY PAEP (no diffusion), for control-fps polling in real runner.
+
+        Returns (B,*) tensors on the policy device:
+        - paep_p_phase:   (B, E)
+        - paep_p_contact: (B, 1)
+        - paep_g_contact: (B, 1)
+        - paep_phase_id:  (B, 1) int64
+        - paep_phase_conf:(B, 1)
+        """
+        # split raw & dp obs (raw provides [0,1] rgb for PAEP)
+        obs_raw, _ = self._split_raw_and_dp_obs(obs_dict)
+
+        # infer B, To from any tensor
+        any_v = next(v for v in obs_raw.values() if torch.is_tensor(v))
+        B = int(any_v.shape[0])
+        To = int(self.n_obs_steps)
+
+        # PAEP raw inputs (match your _encode_fused_obs keys)
+        ext_raw = obs_raw["external_img"][:, :To]                 # (B,To,3,H,W)
+        left_wrist_raw = obs_raw["left_wrist_img"][:, :To]        # (B,To,3,H,W)
+        right_wrist_raw = obs_raw["right_wrist_img"][:, :To]      # (B,To,3,H,W)
+        wrench_hist_raw = obs_raw[self.wrench_hist_key][:, :To]   # (B,To,L,6)
+        pose_raw = obs_raw[self.pose_key][:, :To]                 # (B,To,9)
+
+        # flatten to (B*To,...)
+        flat_ext = ext_raw.reshape(-1, *ext_raw.shape[2:]).to(device=self.device, dtype=self.dtype)
+        flat_left = left_wrist_raw.reshape(-1, *left_wrist_raw.shape[2:]).to(device=self.device, dtype=self.dtype)
+        flat_right = right_wrist_raw.reshape(-1, *right_wrist_raw.shape[2:]).to(device=self.device, dtype=self.dtype)
+        flat_wrench = wrench_hist_raw.reshape(-1, *wrench_hist_raw.shape[2:]).to(device=self.device, dtype=self.dtype)
+        flat_pose = pose_raw.reshape(-1, *pose_raw.shape[2:]).to(device=self.device, dtype=self.dtype)
+
+        # run PAEP forward (returns (B*To,E), (B*To,1))
+        p_phase_bt, p_contact_bt = self._run_paep(flat_ext, flat_left, flat_right, flat_wrench, flat_pose)
+
+        # take last obs-step (t = To-1)
+        E = int(p_phase_bt.shape[-1])
+        p_phase = p_phase_bt.reshape(B, To, E)[:, -1]          # (B,E)
+        p_contact = p_contact_bt.reshape(B, To, 1)[:, -1]      # (B,1)
+
+        g_contact = self._compute_g_contact(p_contact).view(B, 1)  # (B,1)
+        phase_conf, phase_id = torch.max(p_phase, dim=-1)             # (B,), (B,)
+
+        return {
+            "paep_p_phase": p_phase,
+            "paep_p_contact": p_contact,
+            "paep_g_contact": g_contact,
+            "paep_phase_id": phase_id.view(B, 1).to(torch.int64),
+            "paep_phase_conf": phase_conf.view(B, 1),
+        }
+
     @torch.no_grad()
     def _run_paep(self, ext_img, left_wrist_img, right_wrist_img, wrench_hist, pose):
         """
@@ -504,9 +558,33 @@ class PAEPGatedDiffusionUnetImageForcePolicy(BaseImagePolicy):
         flat_wrench_raw = wrench_hist_raw.reshape(-1, *wrench_hist_raw.shape[2:])  # (B*To,L,6)
         flat_pose = pose_raw.reshape(-1, *pose_raw.shape[2:])                      # (B*To,9)
 
-        # PAEP
-        p_phase, p_contact = self._run_paep(flat_ext, flat_left_wrist, flat_right_wrist, flat_wrench_raw, flat_pose)
+
+        # ---- PAEP (external injected OR internal run) ----
+        # If runner injects PAEP outputs into obs_dict, we can skip PAEP forward here to remove redundancy.
+        ext_phase = obs_raw.get("paep_p_phase", None)
+        ext_contact = obs_raw.get("paep_p_contact", None)
+
+        if (ext_phase is not None) and (ext_contact is not None):
+            # expected shapes:
+            #   (B,To,E) & (B,To,1)  OR  already flattened (B*To,E)/(B*To,1)
+            if ext_phase.dim() == 3:
+                p_phase = ext_phase[:, :To].reshape(-1, ext_phase.shape[-1])
+            else:
+                p_phase = ext_phase.reshape(-1, ext_phase.shape[-1])
+
+            if ext_contact.dim() == 3:
+                p_contact = ext_contact[:, :To].reshape(-1, ext_contact.shape[-1])
+            else:
+                p_contact = ext_contact.reshape(-1, ext_contact.shape[-1])
+
+            # ensure dtype/device match
+            p_phase = p_phase.to(device=v_feat.device, dtype=v_feat.dtype)
+            p_contact = p_contact.to(device=v_feat.device, dtype=v_feat.dtype)
+        else:
+            p_phase, p_contact = self._run_paep(flat_ext, flat_left_wrist, flat_right_wrist, flat_wrench_raw, flat_pose)
+
         g_contact = self._compute_g_contact(p_contact)
+
 
         # if _rank0():
         #     pc = p_contact

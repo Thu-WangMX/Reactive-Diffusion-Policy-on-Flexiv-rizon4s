@@ -144,6 +144,8 @@ class ROS2DataConverter:
         # Decode the image from JPEG format
         np_arr = np.frombuffer(msg.data, np.uint8)
         color_image = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+        # logger.info(f"[RW_DECODE] ok={color_image is not None} shape={None if color_image is None else color_image.shape}")
+
         
         return color_image
     

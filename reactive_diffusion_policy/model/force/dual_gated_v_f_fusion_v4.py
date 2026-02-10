@@ -47,7 +47,7 @@ class DualGatedVisionForceFusion(nn.Module):
         alpha_max: float = 0.2,
         # Optional safety: injected_norm <= inj_ratio_cap * vision_norm
         inj_ratio_cap: float | None = None,
-        num_events: int = 3,
+        num_events: int = 4,
         # Debug (no file I/O)
         enable_debug: bool = True,#TODO
     ):

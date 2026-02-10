@@ -8,8 +8,7 @@ name: wmx_real_image_dp_absolute_12fps_plug_in_charger
 image_shape: [3, 240, 320]
 
 # 按你的实际数据路径改
-dataset_path: /home/ubuntu/Reactive-Diffusion-Policy-on-Flexiv-rizon4s-2-training-0125/dataset/plug_in_charger_stream_downsample2_zarr
-
+dataset_path: /home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/dataset/plug_in_charger/plug_in_charger_stream_downsample2_zarr
 shape_meta: &shape_meta
   # acceptable types: rgb, low_dim
   obs:
@@ -51,8 +50,8 @@ env_runner:
   _target_: reactive_diffusion_policy.env_runner.real_runner.RealRunner
   eval_episodes: 10
   max_duration_time: 300
-  tcp_action_update_interval: 8
-  gripper_action_update_interval: 8
+  tcp_action_update_interval: 2
+  gripper_action_update_interval: 2
   # tcp_action_update_interval: 2
   # gripper_action_update_interval: 2
   tcp_pos_clip_range:
@@ -64,7 +63,6 @@ env_runner:
   latency_step: 2
   gripper_latency_step: 4
   control_fps: 12        # DP 控制频率
-  #control_fps: 24        # 修改
   inference_fps: 6
   n_obs_steps: ${n_obs_steps}
   obs_temporal_downsample_ratio: 2
@@ -72,9 +70,11 @@ env_runner:
   transform_params: ${task.transforms}
   shape_meta: *shape_meta
   tcp_ensemble_buffer_params:
-    ensemble_mode: 'new'
+    ensemble_mode: 'hato'
+    tau: 0.95
   gripper_ensemble_buffer_params:
-    ensemble_mode: 'new'
+    ensemble_mode: 'hato'
+    tau: 0.9
   use_relative_action: ${task.dataset.relative_action}
   action_interpolation_ratio: 1
   enable_video_recording: False

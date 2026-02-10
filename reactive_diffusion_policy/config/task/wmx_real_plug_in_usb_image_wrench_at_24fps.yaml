@@ -1,11 +1,11 @@
 defaults:
-  - real_wipe_two_realsense_one_gelsight_one_mctac_24fps@_here_
+  - wmx_data_collection@_here_
   - _self_
 
-name: real_wipe_image_gelsight_emb_at_24fps
+name: wmx_real_plug_in_usb_image_wrench_at_24fps
 
 image_shape: [3, 240, 320]
-dataset_path: data/wipe_v1_zarr
+dataset_path: /home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/dataset/plug_in_usb/plug_in_usb_rdp_stream_downsample1_zarr
 
 shape_meta: &shape_meta
   # acceptable types: rgb, low_dim
@@ -16,12 +16,12 @@ shape_meta: &shape_meta
     left_robot_gripper_width:
       shape: [1]
       type: low_dim
-    left_gripper1_marker_offset_emb:
-      shape: [ 15 ]  # the raw dimension is (63*2), we use PCA to reduce the dimension to 15
+    left_robot_tcp_wrench:
+      shape: [6]
       type: low_dim
   extended_obs: # for the AT RNN decoder of the latent diffusion policy
-    left_gripper1_marker_offset_emb:
-      shape: [ 15 ]  # the raw dimension is (63*2), we use PCA to reduce the dimension to 15
+    left_robot_tcp_wrench:
+      shape: [6]
       type: low_dim
   action:
     shape: [10] # (3+6+1) (x, y, z, 6d rotation, gripper_width)

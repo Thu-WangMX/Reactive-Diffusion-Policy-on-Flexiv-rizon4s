@@ -1,69 +1,83 @@
 defaults:
-  - real_peel_two_realsense_one_gelsight_one_mctac_24fps@_here_
+  - wmx_data_collection@_here_
   - _self_
 
-name: real_peel_image_mctac_emb_ldp_24fps
+name: wmx_real_plug_in_usb_image_dp_absolute_12fps
 
+# 你的数据是 (H, W, 3) = (240, 320, 3)
 image_shape: [3, 240, 320]
-dataset_path: data/peel_v1_zarr
 
+# 按你的实际数据路径改
+dataset_path: /home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/dataset/plug_in_usb/plug_in_usb_stream_downsample2_zarr
 shape_meta: &shape_meta
   # acceptable types: rgb, low_dim
   obs:
+    # 腕部相机
     left_wrist_img:
       shape: ${task.image_shape}
       type: rgb
+
+    # 外部相机
+    external_img:
+      shape: ${task.image_shape}
+      type: rgb
+
+    right_wrist_img:
+      shape: ${task.image_shape}
+      type: rgb
+
+    # 末端位姿（9维）
     left_robot_tcp_pose:
-      shape: [3]
+      shape: [9]
       type: low_dim
+
+    # 夹爪开合宽度（1维）
     left_robot_gripper_width:
       shape: [1]
       type: low_dim
-    left_gripper2_marker_offset_emb:
-      shape: [ 15 ]  # the raw dimension is (63*2), we use PCA to reduce the dimension to 15
-      type: low_dim
-  extended_obs: # for the AT RNN decoder of the latent diffusion policy
-    left_gripper2_marker_offset_emb:
-      shape: [ 15 ]  # the raw dimension is (63*2), we use PCA to reduce the dimension to 15
-      type: low_dim
+    
+    # #DP+末端六维力
+    # left_robot_tcp_wrench:
+    #   shape: [6]
+    #   type: low_dim
+
+  # 动作：和你 zarr 里的 action 对应，10 维
   action:
-    shape: [4] # (3+6+1) (x, y, z, 6d rotation, gripper_width)
+    shape: [10]
+
 
 env_runner:
   _target_: reactive_diffusion_policy.env_runner.real_runner.RealRunner
   eval_episodes: 10
-  max_duration_time: 24
-  tcp_action_update_interval: 16
-  gripper_action_update_interval: 16
-  tcp_pos_clip_range: # no clip for x, y, clip for z
-    - [ -100, -100, 0.13 ]
-    - [ 100, 100, 1.0 ]
+  max_duration_time: 300
+  tcp_action_update_interval: 2
+  gripper_action_update_interval: 2
+  # tcp_action_update_interval: 2
+  # gripper_action_update_interval: 2
+  tcp_pos_clip_range:
+    - [-100, -100, 0.04]
+    - [100, 100, 1.0]
   tcp_rot_clip_range:
-    - [ -3.14159, 0.0, 3.14159 ]
-    - [ -3.14159, 0.0, 3.14159 ]
-  latency_step: 4
+    - [-100, -100, -100]
+    - [100, 100, 100]
+  latency_step: 2
   gripper_latency_step: 4
-  control_fps: 24
+  control_fps: 12        # DP 控制频率
   inference_fps: 6
   n_obs_steps: ${n_obs_steps}
-  obs_temporal_downsample_ratio: ${obs_temporal_downsample_ratio}
-  dataset_obs_temporal_downsample_ratio: ${dataset_obs_temporal_downsample_ratio}
-  downsample_extended_obs: ${eval:'${obs_temporal_downsample_ratio}!=${dataset_obs_temporal_downsample_ratio}'}
+  obs_temporal_downsample_ratio: 2
   task_name: ${task_name}
   transform_params: ${task.transforms}
   shape_meta: *shape_meta
-  use_latent_action_with_rnn_decoder: True
   tcp_ensemble_buffer_params:
-    ensemble_mode: 'new'
+    ensemble_mode: 'hato'
+    tau: 0.95
   gripper_ensemble_buffer_params:
-    ensemble_mode: 'new'
-  latent_tcp_ensemble_buffer_params:
-    ensemble_mode: 'new'
-  latent_gripper_ensemble_buffer_params:
-    ensemble_mode: 'new'
+    ensemble_mode: 'hato'
+    tau: 0.9
   use_relative_action: ${task.dataset.relative_action}
   action_interpolation_ratio: 1
-  enable_video_recording: True
+  enable_video_recording: False
   vcamera_server_ip:
     - 192.168.2.252
     - 192.168.2.252
@@ -86,18 +100,15 @@ env_runner:
           store: False
           transformation_matrix_path: 'data/PCA_Transform_GelSight/pca_transform_matrix.npy'
           mean_matrix_path: 'data/PCA_Transform_GelSight/pca_mean_matrix.npy'
-        McTac:
+        McTac_v1:
           n_components: 15
           normalize: False
           mode: 'Eval'
           store: False
           transformation_matrix_path: 'data/PCA_Transform_McTAC_v1/pca_transform_matrix.npy'
           mean_matrix_path: 'data/PCA_Transform_McTAC_v1/pca_mean_matrix.npy'
-      use_6d_rotation: True
-      marker_dimension: 2
+      #max_fps: 10
       debug: False
-    max_fps: 10
-    debug: False
     # gripper control params
     use_force_control_for_gripper: ${task.teleop_server.use_force_control_for_gripper}
     max_gripper_width: ${task.teleop_server.max_gripper_width}
@@ -109,38 +120,21 @@ env_runner:
     enable_gripper_width_clipping: True
 
 dataset:
-  _target_: reactive_diffusion_policy.dataset.real_image_tactile_latent_diffusion_dataset.RealImageTactileLatentDiffusionDataset
+  _target_: reactive_diffusion_policy.dataset.real_image_tactile_dataset.RealImageTactileDataset
   shape_meta: *shape_meta
   dataset_path: ${task.dataset_path}
+
   horizon: ${horizon}
   pad_before: ${eval:'${dataset_obs_steps}-1+${n_latency_steps}'}
   pad_after: ${eval:'${n_action_steps}-1'}
-  n_obs_steps: ${dataset_obs_steps}
-  obs_temporal_downsample_ratio: ${dataset_obs_temporal_downsample_ratio}
-  n_latency_steps: ${n_latency_steps}
-  seed: 42
-  val_ratio: 0.00
-  max_train_episodes: null
-  delta_action: False
-  relative_action: True
 
-  # for calculating the normalizer parameters for the latent action
-  use_latent_action_before_vq: False
-  at:
-    _target_: reactive_diffusion_policy.model.vae.model.VAE
-    shape_meta: ${shape_meta}
-    horizon: ${at.policy.horizon}
-    n_latent_dims: ${at.policy.n_latent_dims}
-    mlp_layer_num: ${at.policy.mlp_layer_num}
-    use_conv_encoder: ${at.policy.use_conv_encoder}
-    conv_latent_dims: ${at.policy.conv_latent_dims}
-    conv_layer_num: ${at.policy.conv_layer_num}
-    use_rnn_decoder: ${at.policy.use_rnn_decoder}
-    rnn_latent_dims: ${at.policy.rnn_latent_dims}
-    rnn_layer_num: ${at.policy.rnn_layer_num}
-    use_vq: ${at.policy.use_vq}
-    n_embed: ${at.policy.n_embed}
-    vqvae_groups: ${at.policy.vqvae_groups}
-    eval: true
-    load_dir: ${at_load_dir}
-    act_scale: ${at.policy.act_scale}
+  n_obs_steps: ${dataset_obs_steps}
+  n_latency_steps: ${n_latency_steps}
+
+  seed: 42
+  val_ratio: 0.0
+  max_train_episodes: null
+
+  # DP 这份是 absolute policy
+  delta_action: false
+  relative_action: false

@@ -177,7 +177,8 @@ class BimanualFlexivServer():
                 raise HTTPException(status_code=400, detail="Right robot not available in single-arm mode.")
 
             robot_gripper = self.left_robot.gripper if robot_side == 'left' else self.right_robot.gripper
-            robot_gripper.Move(request.width, request.velocity, request.force_limit)
+            #robot_gripper.Move(request.width, request.velocity, request.force_limit)
+            robot_gripper.Move(request.width, request.velocity, 80 ) #插插头
             #print("request.width",request.width)
             return {
                 "message": f"{robot_side.capitalize()} gripper moving to width {request.width} "

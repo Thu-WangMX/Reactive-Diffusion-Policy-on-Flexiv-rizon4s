@@ -22,7 +22,7 @@ DRAW_FORCE = False             # 同上
 
 USE_ABSOLUTE_ACTION = True
 
-TAG = 'plug_in_charger'  # 任务名称，对应 data 目录名
+TAG = 'plug_in_usb'  # 任务名称，对应 data 目录名
 ACTION_DIM = 10  # 我们现在只支持 4 或 10，其他 raise
 TEMPORAL_DOWNSAMPLE_RATIO = 2  # 每条 episode 内的时间下采样比例
 

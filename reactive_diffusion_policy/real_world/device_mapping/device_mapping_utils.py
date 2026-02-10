@@ -9,10 +9,18 @@ from loguru import logger
 def get_topic_and_type(device_to_topic: DeviceToTopic):
     subs_name_type = []
 
+    # for camera_name, info in device_to_topic.realsense.items():
+    #     logger.debug(f'camera info: {info}')
+    #     subs_name_type.append((f'/{camera_name}/color/image_raw', Image))
+    #     #subs_name_type.append((f'/{camera_name}/depth/image_raw', Image))   # 新增depth
+
     for camera_name, info in device_to_topic.realsense.items():
-        logger.debug(f'camera info: {info}')
-        subs_name_type.append((f'/{camera_name}/color/image_raw', Image))
-        #subs_name_type.append((f'/{camera_name}/depth/image_raw', Image))   # 新增depth
+        logger.debug(f"camera info: {info}")
+        topic = info.topic_image
+        if not topic.startswith("/"):
+            topic = "/" + topic
+        subs_name_type.append((topic, Image))
+
     for camera_name, info in device_to_topic.usb.items():
         subs_name_type.append((f'/{camera_name}/color/image_raw', Image))
         subs_name_type.append((f'/{camera_name}/marker_offset/information', PointCloud2))

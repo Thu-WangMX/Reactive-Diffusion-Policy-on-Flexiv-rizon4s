@@ -36,7 +36,7 @@ class PAEPFutureNet(nn.Module):
         force_feat_dim: int = 256,
         # TCN params
         tcn_channels: int = 256,
-        tcn_kernel: int = 5,
+        tcn_kernel: int = 7,
         tcn_blocks: int = 4,
         tcn_dropout: float = 0.0,
         tcn_pool: str = "mean",       # "mean" | "last"
