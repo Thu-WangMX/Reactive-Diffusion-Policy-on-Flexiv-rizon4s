@@ -64,7 +64,10 @@ class DualGatedVisionForceFusion(nn.Module):
         self._last_fusion_debug = None
 
         # attention
-        self.cross_attn = HeadWiseCrossAttention(d_model=d_model, n_heads=n_heads, dropout=dropout)
+        self.cross_attn = HeadWiseCrossAttention(
+            d_model=d_model, n_heads=n_heads, dropout=dropout, attn_temperature=1.5
+        )
+
 
         # head-wise gate (phase -> heads), optionally include p_contact
 
@@ -136,7 +139,16 @@ class DualGatedVisionForceFusion(nn.Module):
 
         # pre-norm for attention
         v_q = self.ln_v(v_tok)                  # (B,1,D)
+        #f_kv = self.ln_force(force_tokens)      # (B,L,D)
         f_kv = self.ln_force(force_tokens)      # (B,L,D)
+
+        # -------- force token safety clip (prevents rare explosions) --------
+        # clip by per-token L2 norm: ||token|| <= force_tok_norm_cap
+        force_tok_norm_cap = 50.0  # 推荐先用 30~80 之间试；你现在爆到1e4，50已经能挡掉绝大多数异常
+        tok_norm = f_kv.norm(dim=-1, keepdim=True).clamp_min(self.eps)   # (B,L,1)
+        scale_clip = torch.clamp(force_tok_norm_cap / tok_norm, max=1.0) # (B,L,1)
+        f_kv = f_kv * scale_clip
+
 
         # head-wise gate (Gate-2)
         if self.use_contact_in_head_gate:
@@ -150,15 +162,17 @@ class DualGatedVisionForceFusion(nn.Module):
         delta = self.cross_attn(v_q, f_kv, g_head)            # (B,1,D)
         delta = self.ln_delta(delta)
 
-        # orthogonal residual: remove component parallel to v_q
-        # proj = (<delta, v_q> / <v_q, v_q>) * v_q
-        dot = (delta * v_q).sum(dim=-1, keepdim=True)                         # (B,1,1)
-        denom = (v_q * v_q).sum(dim=-1, keepdim=True).clamp_min(eps)          # (B,1,1)
-        proj = dot / denom * v_q                                              # (B,1,D)
-        delta_perp = delta - proj                                             # (B,1,D)
+        # orthogonal residual: remove component parallel to RAW vision token (pre-LN)
+        # proj = (<delta, v_ref> / <v_ref, v_ref>) * v_ref
+        v_ref = v_tok  # raw vision token, shape (B,1,D)
+        dot = (delta * v_ref).sum(dim=-1, keepdim=True)                        # (B,1,1)
+        denom = (v_ref * v_ref).sum(dim=-1, keepdim=True).clamp_min(eps)       # (B,1,1)
+        proj = dot / denom * v_ref                                             # (B,1,D)
+        delta_perp = delta - proj                                              # (B,1,D)
+                                          # (B,1,D)
 
         # unit direction (safe, scale is controlled only by alpha*g_contact)
-        d_hat = self._unit(delta_perp, eps=eps)
+        d_hat = self._unit(delta_perp, eps=eps) #单位化
 
         # Gate-1: contact strength (should allow 0)
         alpha = self._get_alpha()                                             # scalar
@@ -166,8 +180,9 @@ class DualGatedVisionForceFusion(nn.Module):
 
         # optional safety cap on injected_norm / vision_norm
         if self.inj_ratio_cap is not None:
-            v_norm = v_q.norm(dim=-1, keepdim=True).clamp_min(eps)            # (B,1,1)
-            max_scale = self.inj_ratio_cap * v_norm                           # (B,1,1)
+            # use RAW vision token norm (pre-LN) for a more stable physical reference
+            v_raw_norm = v_tok.norm(dim=-1, keepdim=True).clamp_min(eps)      # (B,1,1)
+            max_scale = self.inj_ratio_cap * v_raw_norm                       # (B,1,1)
             scale = torch.minimum(scale, max_scale)
 
         v_fused = v_q + scale * d_hat                                         # (B,1,D)
@@ -177,7 +192,7 @@ class DualGatedVisionForceFusion(nn.Module):
         if self.enable_debug:
             with torch.no_grad():
                 # ---- norms ----
-                vn = v_q.norm(dim=-1).squeeze(1)                            # (B,)
+                vn = v_tok.norm(dim=-1).squeeze(1)                       # (B,)
                 dn = delta.norm(dim=-1).squeeze(1)                          # (B,)
                 inj_vec = (scale * d_hat).squeeze(1)                        # (B,D)
                 inj = inj_vec.norm(dim=-1)                                  # (B,)
@@ -191,10 +206,12 @@ class DualGatedVisionForceFusion(nn.Module):
                 delta_over_v = dn / (vn + eps_)
                 inj_over_v   = inj / (vn + eps_)
 
-                # ---- cos(v,delta) ----
-                denom = (v_q.norm(dim=-1).squeeze(1).clamp_min(eps_) *
-                        delta.norm(dim=-1).squeeze(1).clamp_min(eps_))
-                cos_vd = (v_q * delta).sum(dim=-1).squeeze(1) / (denom + eps_)
+                # ---- cos(v_ref,delta) ----
+                v_ref = v_tok  # raw vision token (pre-LN) for interpretability
+                denom = (v_ref.norm(dim=-1).squeeze(1).clamp_min(eps_) *
+                         delta.norm(dim=-1).squeeze(1).clamp_min(eps_))
+                cos_vd = (v_ref * delta).sum(dim=-1).squeeze(1) / (denom + eps_)
+
 
                 # ---- phase/contact stats ----
                 # p_phase: (B,3), p_contact: (B,1)

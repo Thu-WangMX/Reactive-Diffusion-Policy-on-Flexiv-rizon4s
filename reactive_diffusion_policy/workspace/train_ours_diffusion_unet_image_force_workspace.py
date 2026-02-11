@@ -1,4 +1,4 @@
-# reactive_diffusion_policy/workspace/train_diffusion_unet_image_workspace.py
+
 
 if __name__ == "__main__":
     import sys
@@ -264,6 +264,28 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
                 ) as tepoch:
                     for batch_idx, batch in enumerate(tepoch):
                         batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
+
+                        # -------- debug: log episode id distribution in this batch --------
+                        ep_stats = None
+                        eid_tensor = None
+
+                        if isinstance(batch, dict):
+                            # preferred nested style: batch["debug"]["episode_id"]
+                            if ("debug" in batch) and isinstance(batch["debug"], dict) and ("episode_id" in batch["debug"]):
+                                eid_tensor = batch["debug"]["episode_id"]
+                            # fallback flat key style: batch["debug/episode_id"]
+                            elif "debug/episode_id" in batch:
+                                eid_tensor = batch["debug/episode_id"]
+
+                        if eid_tensor is not None:
+                            eid = eid_tensor.view(-1)
+                            ep_stats = {
+                                "data/episode_id_min": float(eid.min().item()),
+                                "data/episode_id_max": float(eid.max().item()),
+                                "data/episode_id_mean": float(eid.float().mean().item()),
+                            }
+
+
                         if train_sampling_batch is None:
                             train_sampling_batch = batch
 
@@ -302,11 +324,16 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
                         train_losses.append(raw_loss_cpu)
 
                         step_log = {
-                            "train_loss": raw_loss_cpu,
+                            # --- loss keys: DO NOT mix step and epoch meanings ---
+                            "train/loss_step": raw_loss_cpu,
+
                             "global_step": self.global_step,
                             "epoch": self.epoch,
                             "lr": lr_scheduler.get_last_lr()[0],
                         }
+                        if ep_stats is not None:
+                            step_log.update(ep_stats)
+
 
                         is_last_batch = (batch_idx == (len(train_dataloader) - 1))
 
@@ -337,7 +364,13 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
 
                 # ✅ start final_log from last train step (deferred), or fallback
                 final_log = dict(pending_last_train_step_log) if pending_last_train_step_log is not None else dict(step_log)
-                final_log["train_loss"] = train_loss
+
+                # keep last-step loss (already in final_log["train/loss_step"]) and add epoch summary separately
+                final_log["train/loss_epoch"] = train_loss
+
+                # (optional, helpful) make it explicit what's inside final_log
+                final_log["train/loss_last_step"] = float(final_log.get("train/loss_step", float("nan")))
+
 
                 # ========= eval for this epoch ==========
                 policy = accelerator.unwrap_model(self.model)

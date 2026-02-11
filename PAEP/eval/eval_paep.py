@@ -23,9 +23,9 @@ from torch.utils.data import DataLoader
 # ------------------------------------------------------------
 # 0) Hard-coded paths (EDIT THESE ONLY IF NEEDED)
 # ------------------------------------------------------------
-CKPT_PATH = "/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/PAEP/ckpt/paep_plug_in_charger_0205/best.pt"
-ZARR_PATH = "/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/dataset/plug_in_charger/plug_in_charger_stream_downsample1_zarr/replay_buffer.zarr"
-SPLIT_JSON = "/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/PAEP/config/paep_split_plugin_charger.json"
+CKPT_PATH = "/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/PAEP/ckpt/paep_plug_in_usb_0210/best.pt"
+ZARR_PATH = "/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/dataset/plug_in_usb/plug_in_usb_stream_downsample1_zarr/replay_buffer.zarr"
+SPLIT_JSON = "/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/PAEP/config/paep_split_plugin_usb.json"
 
 SPLIT = "test"          # "train" / "val" / "test"
 EVAL_SAMPLES = 20000     # how many random samples to evaluate

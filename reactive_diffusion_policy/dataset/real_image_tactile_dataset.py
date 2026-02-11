@@ -449,9 +449,17 @@ class RealImageTactileDataset(BaseImageDataset):
                             obs_dict[key], base_absolute_action=base_absolute_action
                         )
 
+        # -------- debug: which episode this sample comes from --------
+        # use buffer_end_idx to locate episode id in replay_buffer.episode_ends (exclusive ends)
+        ep_id = int(np.searchsorted(self.episode_ends, buffer_end_idx, side="right"))
+        # keep it as a 1-d scalar tensor so DataLoader can collate to (B,1)
+        debug_dict = {"episode_id": np.array([ep_id], dtype=np.int64)}
+
+
         torch_data = {
             "obs": dict_apply(obs_dict, torch.from_numpy),
             "action": torch.from_numpy(action),
             "extended_obs": dict_apply(extended_obs_dict, torch.from_numpy),
+            "debug": dict_apply(debug_dict, torch.from_numpy),
         }
         return torch_data

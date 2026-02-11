@@ -17,7 +17,8 @@ class HeadWiseCrossAttention(nn.Module):
     KV: (B, Nk, D)
     gate_h: (B, H) in [0,1]
     """
-    def __init__(self, d_model: int, n_heads: int, dropout: float = 0.0):
+    def __init__(self, d_model: int, n_heads: int, dropout: float = 0.0, attn_temperature: float = 1.0):
+
         super().__init__()
         assert d_model % n_heads == 0
         self.d_model = d_model
@@ -29,6 +30,7 @@ class HeadWiseCrossAttention(nn.Module):
         self.v_proj = nn.Linear(d_model, d_model)
         self.out_proj = nn.Linear(d_model, d_model)
         self.drop = nn.Dropout(dropout)
+        self.attn_temperature = float(attn_temperature)
 
         self._last_attn_debug = None
 
@@ -42,7 +44,9 @@ class HeadWiseCrossAttention(nn.Module):
         kh = self.k_proj(kv).view(B, Nk, H, dh).transpose(1, 2)    # (B,H,Nk,dh)
         vh = self.v_proj(kv).view(B, Nk, H, dh).transpose(1, 2)    # (B,H,Nk,dh)
 
-        attn = torch.matmul(qh, kh.transpose(-2, -1)) / math.sqrt(dh)  # (B,H,Nq,Nk)
+        temp = max(self.attn_temperature, 1e-6)
+        attn = torch.matmul(qh, kh.transpose(-2, -1)) / (math.sqrt(dh) * temp)
+        attn = attn.clamp(min=-30.0, max=30.0)
         w = torch.softmax(attn, dim=-1)
         w = self.drop(w)
 
