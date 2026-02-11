@@ -18,7 +18,7 @@ from paep_model import PAEPFutureNet
 
 
 # 读取不同任务的配置文件
-CFG_PATH = "/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/PAEP/config/paep_plug_in_charger.py"
+CFG_PATH = "/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/PAEP/config/paep_plug_in_usb.py"
 #CFG_PATH = "/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/PAEP/config/paep_wiping_board.py"
 
 def atomic_torch_save(obj, path: str):
