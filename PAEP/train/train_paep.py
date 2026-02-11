@@ -25,21 +25,16 @@ torch.backends.cudnn.allow_tf32 = True         # 允许卷积使用 TF32
 # 默认配置文件路径
 CFG_PATH = "/root/workspace/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/PAEP/config/paep_plug_in_usb.py"
 
+
+# 读取不同任务的配置文件
+#CFG_PATH = "/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/PAEP/config/paep_wiping_board.py"
+
 def atomic_torch_save(obj, path: str):
     """原子保存，防止中断导致文件损坏"""
     tmp = path + ".tmp"
     torch.save(obj, tmp)
     os.replace(tmp, path)
 
-def _state_dict_to_cpu(state_dict):
-    """将模型参数移至 CPU"""
-    cpu_sd = {}
-    for k, v in state_dict.items():
-        if torch.is_tensor(v):
-            cpu_sd[k] = v.detach().cpu()
-        else:
-            cpu_sd[k] = v
-    return cpu_sd
 
 def _state_dict_to_cpu(state_dict):
     """将模型参数移至 CPU，并自动移除 torch.compile 带来的 _orig_mod. 前缀"""

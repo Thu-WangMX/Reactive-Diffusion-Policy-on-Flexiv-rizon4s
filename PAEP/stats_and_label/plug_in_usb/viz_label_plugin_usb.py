@@ -31,8 +31,8 @@ import cv2
 ZARR_PATH = "/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/dataset/plug_in_usb/plug_in_usb_stream_downsample1_zarr/replay_buffer.zarr"
 
 # 选择 episode 范围（包含两端）
-EPISODE_ID_START = 0
-EPISODE_ID_END = 10
+EPISODE_ID_START = 90
+EPISODE_ID_END = 100
 
 # 输出模式
 #   "per_episode": 每个 episode 单独一个 mp4（推荐）

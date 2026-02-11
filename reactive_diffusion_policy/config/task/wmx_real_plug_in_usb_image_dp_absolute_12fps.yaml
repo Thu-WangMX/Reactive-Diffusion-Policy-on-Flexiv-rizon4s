@@ -2,7 +2,7 @@ defaults:
   - wmx_data_collection@_here_
   - _self_
 
-name: wmx_real_plug_in_usb_image_dp_absolute_12fps
+name: wmx_real_plug_in_usb_image_dp_absolute_12fps 
 
 # 你的数据是 (H, W, 3) = (240, 320, 3)
 image_shape: [3, 240, 320]
@@ -120,7 +120,7 @@ env_runner:
     enable_gripper_width_clipping: True
 
 dataset:
-  _target_: reactive_diffusion_policy.dataset.real_image_tactile_dataset.RealImageTactileDataset
+  _target_: reactive_diffusion_policy.dataset.real_image_tactile_dataset_v0.RealImageTactileDataset
   shape_meta: *shape_meta
   dataset_path: ${task.dataset_path}
 

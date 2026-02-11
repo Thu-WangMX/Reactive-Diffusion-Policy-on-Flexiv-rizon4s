@@ -27,7 +27,7 @@ shape_meta: &shape_meta
     shape: [10] # (3+6+1) (x, y, z, 6d rotation, gripper_width)
 
 dataset:
-  _target_: reactive_diffusion_policy.dataset.real_image_tactile_dataset.RealImageTactileDataset
+  _target_: reactive_diffusion_policy.dataset.real_image_tactile_dataset_v0.RealImageTactileDataset
   shape_meta: *shape_meta
   dataset_path: ${task.dataset_path}
   horizon: ${horizon}
