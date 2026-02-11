@@ -3,9 +3,9 @@
 # =========================
 # dataset / io
 # =========================
-ZARR_PATH = "/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/dataset/plug_in_charger/plug_in_charger_stream_downsample1_zarr/replay_buffer.zarr"
-SPLIT_JSON = "/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/PAEP/config/paep_split_plugin_charger.json" 
-SAVE_DIR = "/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/PAEP/ckpt/paep_plug_in_charger_0205"
+ZARR_PATH = "/root/workspace/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/dataset/plug_in_usb_stream_downsample1_zarr/replay_buffer.zarr"
+SPLIT_JSON = "/root/workspace/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/PAEP/config/paep_split_plugin_usb.json" 
+SAVE_DIR = "/root/workspace/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/PAEP/ckpt/paep_plug_in_usb_0210"
 
 PHASE_NAMES = ["approach", "search", "recovery", "insert"]  # 
 
@@ -47,11 +47,11 @@ GEOM_PROB = 0.05
 # =========================
 # train
 # =========================
-BATCH_SIZE = 128
+BATCH_SIZE = 256
 SAMPLES_PER_EPOCH = 20000
-VAL_SAMPLES = 20000
+VAL_SAMPLES = 4000
 EPOCHS = 30
-LR = 3e-4
+LR = 6e-4
 
 DEVICE = "cuda"
 AMP = True

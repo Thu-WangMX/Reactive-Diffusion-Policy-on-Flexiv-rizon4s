@@ -1,8 +1,8 @@
 defaults:
-  - task: wmx_paep_real_plugin_charger_image_dp_absolute_24fps
+  - task: wmx_paep_real_plugin_usb_image_dp_absolute_24fps
   - _self_
 
-name: train_paep_diffusion_unet_image_force_v4_0207
+name: train_paep_diffusion_unet_image_force_v4_0210_plugin_usb
 #_target_: reactive_diffusion_policy.workspace.train_diffusion_unet_image_workspace.TrainDiffusionUnetImageWorkspace
 _target_: reactive_diffusion_policy.workspace.train_ours_diffusion_unet_image_force_workspace.TrainDiffusionUnetImageWorkspace
 

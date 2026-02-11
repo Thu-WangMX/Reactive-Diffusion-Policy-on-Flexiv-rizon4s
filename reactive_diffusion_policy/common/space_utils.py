@@ -1,6 +1,7 @@
 import numpy as np
 from typing import Tuple, Union
 import transforms3d as t3d
+from dataclasses import dataclass, field
 #from geometry_msgs.msg import Pose
 import scipy.spatial.transform as st
 try:
@@ -22,13 +23,8 @@ except ImportError:
 
     @dataclass
     class Pose:
-        """Minimal stub of geometry_msgs.msg.Pose for non-ROS training.
-
-        只用于让导入正常、类型检查通过；在纯离线训练环境里，
-        一般不会真的构造 ROS 的 Pose 对象。
-        """
-        position: Position = Position()
-        orientation: Orientation = Orientation()
+        position: Position = field(default_factory=Position)
+        orientation: Orientation = field(default_factory=Orientation)
         
 def ros_pose_to_4x4matrix(pose: Pose) -> np.ndarray:
     # Convert ROS Pose message to 4x4 transformation matrix
