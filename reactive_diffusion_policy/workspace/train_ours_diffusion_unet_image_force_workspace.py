@@ -287,7 +287,8 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
 
 
                         if train_sampling_batch is None:
-                            train_sampling_batch = batch
+                            # keep a CPU copy only (do NOT pin a whole batch on GPU)
+                            train_sampling_batch = dict_apply(batch, lambda x: x.detach().cpu())
 
                         # compute loss
                         raw_loss = self.model(batch)
@@ -370,6 +371,8 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
 
                 # (optional, helpful) make it explicit what's inside final_log
                 final_log["train/loss_last_step"] = float(final_log.get("train/loss_step", float("nan")))
+
+                final_log["train_loss"] = float(final_log["train/loss_epoch"])
 
 
                 # ========= eval for this epoch ==========

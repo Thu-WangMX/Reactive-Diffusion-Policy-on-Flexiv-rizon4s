@@ -12,7 +12,7 @@ DATASET_PATH="/root/workspace/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/datase
 OURS_TASK="wmx_paep_real_plugin_usb_image_dp_absolute_24fps"
 WS_CONFIG="train_paep_diffusion_unet_real_image_workspace"
 
-PAEP_CKPT="/home/ubuntu/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/PAEP/best.pt"
+PAEP_CKPT="/root/workspace/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/PAEP/ckpt/paep_plug_in_usb_0210/best.pt"
 #PAEP_CKPT="/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/PAEP/paep_future_ckpt/paep_runs_0124/best.pt"
 
 LOGGING_MODE="online"   # or offline
