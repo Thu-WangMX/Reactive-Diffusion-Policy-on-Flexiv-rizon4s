@@ -60,7 +60,7 @@ class TeleopServer:
                  teleop_mode: str = 'left_arm_6DOF',
                  relative_translation_scale: float = 1.0,
                  # whether using bimanual teleoperation
-                 bimanual_teleop: bool = True,
+                 bimanual_teleop: bool = False,
                  ):
         self.robot_server_ip = robot_server_ip
         self.robot_server_port = robot_server_port
@@ -165,27 +165,33 @@ class TeleopServer:
 
     def send_command(self, endpoint: str, data: dict = None):
         url = f"http://{self.robot_server_ip}:{self.robot_server_port}{endpoint}"
-        print(data)
-        if 'get' in endpoint:
-            response = self.session.get(url)
+
+        # ---- timeout policy ----
+        if endpoint.startswith("/move_tcp"):
+            timeout = 0.001         # 高频 TCP
+        elif endpoint.startswith("/move_gripper") or endpoint.startswith("/stop_gripper"):
+            timeout = 0.3           # 夹爪必须更长
         else:
-            if 'move' in endpoint:
-                # low-level control commands
-                try:
-                    response = self.session.post(url, json=data, timeout=0.001)
-                    print("response",response)
-                    #print(91919191911991191)
-                except requests.exceptions.ReadTimeout:
-                    # Ignore the timeout error for low-level control commands to reduce latency
-                    # TODO: use a more robust way to handle the timeout error
-                    response = None
+            timeout = 1.0
+
+        try:
+            if endpoint.startswith("/get"):
+                resp = self.session.get(url, timeout=timeout)
             else:
-                response = self.session.post(url, json=data)
-        if response is not None:
-            response.raise_for_status()  # Raise an error for bad responses
-            return response.json()
-        else:
-            return dict()
+                resp = self.session.post(url, json=data, timeout=timeout)
+
+            # 非 2xx 直接抛出来，让你看到 400/422
+            resp.raise_for_status()
+            return resp.json()
+
+        except requests.exceptions.ReadTimeout:
+            logger.warning(f"[HTTP TIMEOUT] endpoint={endpoint} timeout={timeout}s data={data}")
+            return {"_timeout": True}
+
+        except Exception as e:
+            logger.exception(f"[HTTP ERROR] endpoint={endpoint} data={data} err={repr(e)}")
+            return {"_error": repr(e)}
+
 
     def set_start_tcp(self, robot_tcp: np.ndarray, unity_tcp: np.ndarray, is_left: bool):
         # record the start position of the robot, and the start position of the unity
@@ -236,7 +242,19 @@ class TeleopServer:
                 gripper_control_width_precision = self.gripper_control_width_precision
                 gripper_control_time_interval = self.gripper_control_time_interval
                 valid_gripper_interval = max_gripper_width - min_gripper_width
-                robot_states = BimanualRobotStates.model_validate(self.send_command('/get_current_robot_states'))
+                #robot_states = BimanualRobotStates.model_validate(self.send_command('/get_current_robot_states'))
+                resp = self.send_command('/get_current_robot_states')
+
+                # ✅ 关键：如果 HTTP 失败/超时，send_command 会返回 {"_error": ...} 或 {"_timeout": True}
+                # 这时绝对不能 model_validate，否则就会抛 Pydantic 校验异常，形成你看到的 traceback
+                if not isinstance(resp, dict) or resp.get("_error") or resp.get("_timeout"):
+                    logger.warning(f"[SKIP] get_current_robot_states failed: {resp}")
+                    precise_sleep(0.002)
+                    continue
+
+                robot_states = BimanualRobotStates.model_validate(resp)
+
+
                 #print("robot_states:",robot_states)
                 left_gripper_width_target = max_gripper_width - mes.leftHand.triggerState * valid_gripper_interval
                 left_tcp = np.array(robot_states.leftRobotTCP)
@@ -262,8 +280,16 @@ class TeleopServer:
                     if abs(self.last_gripper_width_target[0] - left_gripper_width_target) >= gripper_control_width_precision:
                         if self.use_force_control_for_gripper and self.last_gripper_width_target[0] > left_gripper_width_target:
                             # try to close gripper with pure force control
-                            logger.debug(f"left gripper moving from {left_current_width} to target: {left_gripper_width_target} "
-                                        f"with force {grasp_force}")
+
+                            logger.debug(
+                                f"[LEFT_GRIPPER DECIDE] trig={mes.leftHand.triggerState:.3f} "
+                                f"target={left_gripper_width_target:.4f} last={self.last_gripper_width_target[0]:.4f} "
+                                f"cur={robot_states.leftGripperState[0]:.4f} "
+                                f"interval_ok={self.gripper_interval_count==0} "
+                                f"delta_ok={abs(self.last_gripper_width_target[0]-left_gripper_width_target):.5f}"
+                            )
+
+
                             self.send_command('/move_gripper_force/left', {
                                 'width': left_gripper_width_target, 
                                 'velocity': 0.1,
@@ -290,6 +316,7 @@ class TeleopServer:
                                 logger.debug(f"right gripper moving from {right_current_width} to target: {right_gripper_width_target} "
                                             f"with force {grasp_force}")
                                 self.send_command('/move_gripper_force/right', {
+                                    "width": right_current_width,
                                     'force_limit': grasp_force,
                                     'velocity': self.gripper_velocity,
                                 })
@@ -332,7 +359,7 @@ class TeleopServer:
                             logger.info("left robot stop tracking")
                         self.left_tracking_state = False
                         
-                print("mes.leftHand.buttonState[4]",mes.leftHand.buttonState[4])
+                #print("mes.leftHand.buttonState[4]",mes.leftHand.buttonState[4])
                 # print("mes.leftHand.triggerState",mes.leftHand.triggerState)
                 #print("left_tracking_state",self.left_tracking_state)
 
@@ -382,7 +409,7 @@ class TeleopServer:
                             left_target = pose_6d_to_pose_7d(matrix4x4_to_pose_6d(self.transforms.world_to_left_robot_base_transform
                                                             @ pose_6d_to_4x4matrix(left_target_6d_in_world))
                             )
-                            print("TeleopMode为:",self.teleop_mode)
+                            #print("TeleopMode为:",self.teleop_mode)
 
                         elif self.teleop_mode == TeleopMode.left_arm_3D_translation_Z_rotation:
                             # Z轴旋转模式：允许平移 + Z轴(Yaw)旋转
@@ -400,11 +427,11 @@ class TeleopServer:
                             left_target = pose_6d_to_pose_7d(matrix4x4_to_pose_6d(self.transforms.world_to_left_robot_base_transform
                                                             @ pose_6d_to_4x4matrix(left_target_6d_in_world))
                             )
-                            print("TeleopMode为:", self.teleop_mode)
+                            #print("TeleopMode为:", self.teleop_mode)
                             
                         elif self.teleop_mode == TeleopMode.left_arm_6DOF:
                             left_target = left_target_7d_in_robot
-                            print("TeleopMode为:",self.teleop_mode)
+                            #print("TeleopMode为:",self.teleop_mode)
                         elif self.teleop_mode == TeleopMode.dual_arm_3D_translation:
                             # clip action to avoid collision with table
                             # clip r
@@ -417,7 +444,7 @@ class TeleopServer:
                             left_target = pose_6d_to_pose_7d(
                                 matrix4x4_to_pose_6d(self.transforms.world_to_left_robot_base_transform
                                                     @ pose_6d_to_4x4matrix(left_target_6d_in_world)))
-                            print("TeleopMode为:",self.teleop_mode)
+                            #print("TeleopMode为:",self.teleop_mode)
                         else:
                             raise ValueError(f"Unsupported teleoperation mode: {self.teleop_mode}")
 

@@ -169,35 +169,102 @@ class BimanualFlexivServer():
         #         logger.exception("Failed to build BimanualRobotStates")
         #         raise HTTPException(status_code=500, detail=str(e))
             
+        # @self.app.post('/move_gripper/{robot_side}')
+        # async def move_gripper(robot_side: str, request: MoveGripperRequest) -> Dict[str, str]:
+        #     if robot_side not in ['left', 'right']:
+        #         raise HTTPException(status_code=400, detail="Invalid robot side. Use 'left' or 'right'.")
+        #     if not self.bimanual_teleop and robot_side == 'right':
+        #         raise HTTPException(status_code=400, detail="Right robot not available in single-arm mode.")
+
+        #     robot_gripper = self.left_robot.gripper if robot_side == 'left' else self.right_robot.gripper
+        #     #robot_gripper.Move(request.width, request.velocity, request.force_limit)
+        #     robot_gripper.Move(request.width, request.velocity, 20 ) #插插头
+        #     #print("request.width",request.width)
+        #     return {
+        #         "message": f"{robot_side.capitalize()} gripper moving to width {request.width} "
+        #                    f"with velocity {request.velocity} and force limit {request.force_limit}"}
         @self.app.post('/move_gripper/{robot_side}')
-        async def move_gripper(robot_side: str, request: MoveGripperRequest) -> Dict[str, str]:
+        async def move_gripper(robot_side: str, request: MoveGripperRequest):
             if robot_side not in ['left', 'right']:
                 raise HTTPException(status_code=400, detail="Invalid robot side. Use 'left' or 'right'.")
             if not self.bimanual_teleop and robot_side == 'right':
                 raise HTTPException(status_code=400, detail="Right robot not available in single-arm mode.")
 
-            robot_gripper = self.left_robot.gripper if robot_side == 'left' else self.right_robot.gripper
-            #robot_gripper.Move(request.width, request.velocity, request.force_limit)
-            robot_gripper.Move(request.width, request.velocity, 80 ) #插插头
-            #print("request.width",request.width)
-            return {
-                "message": f"{robot_side.capitalize()} gripper moving to width {request.width} "
-                           f"with velocity {request.velocity} and force limit {request.force_limit}"}
+            if robot_side != 'left':
+                raise HTTPException(status_code=400, detail="Only left is available in your setup.")
 
-        @self.app.post('/move_gripper_force/{robot_side}')
-        async def move_gripper_force(robot_side: str, request: MoveGripperRequest) -> Dict[str, str]:
-            if robot_side not in ['left', 'right']:
-                raise HTTPException(status_code=400, detail="Invalid robot side. Use 'left' or 'right'.")
-            if not self.bimanual_teleop and robot_side == 'right':
-                raise HTTPException(status_code=400, detail="Right robot not available in single-arm mode.")
+            width = float(request.width)
+            vel = float(request.velocity)
+            force = float(request.force_limit)
 
-            robot_gripper = self.left_robot.gripper if robot_side == 'left' else self.right_robot.gripper
-            # use force control mode to grasp
-            #robot_gripper.Grasp(request.force_limit)
-            robot_gripper.Move(0, 0.1, 50)
+            logger.info(f"[GRIPPER RX] side=left width={width:.4f} vel={vel:.3f} force_limit={force:.1f}")
+
+            # ✅ 关键：捕获底层异常，把真正原因作为 detail 返回（不再是“玄学 500”）
+            try:
+                self.left_robot.move_gripper_safe(width, vel, force)
+            except Exception as e:
+                logger.exception(f"[GRIPPER MOVE ERROR] side=left width={width} vel={vel} force={force} err={repr(e)}")
+                raise HTTPException(status_code=500, detail=str(e))
+
+            # ✅ 回读，证明 Move 后是否真的在动/宽度是否变化
+            try:
+                st = self.left_robot.gripper_states_safe()
+                logger.info(f"[GRIPPER RB] side=left width={st.width:.4f} force={st.force:.2f} moving={st.is_moving}")
+                return {
+                    "message": "ok",
+                    "cmd_width": width,
+                    "cmd_vel": vel,
+                    "cmd_force_limit": force,
+                    "rb_width": float(st.width),
+                    "rb_force": float(st.force),
+                    "rb_moving": bool(st.is_moving),
+                }
+            except Exception as e:
+                logger.exception(f"[GRIPPER RB ERROR] side=left err={repr(e)}")
+                return {
+                    "message": "ok_no_readback",
+                    "cmd_width": width,
+                    "cmd_vel": vel,
+                    "cmd_force_limit": force,
+                    "readback_error": repr(e),
+                }
+
+
+
+
+        # @self.app.post('/move_gripper_force/{robot_side}')
+        # async def move_gripper_force(robot_side: str, request: MoveGripperRequest) -> Dict[str, str]:
+        #     if robot_side not in ['left', 'right']:
+        #         raise HTTPException(status_code=400, detail="Invalid robot side. Use 'left' or 'right'.")
+        #     if not self.bimanual_teleop and robot_side == 'right':
+        #         raise HTTPException(status_code=400, detail="Right robot not available in single-arm mode.")
+
+        #     robot_gripper = self.left_robot.gripper if robot_side == 'left' else self.right_robot.gripper
+        #     # use force control mode to grasp
+        #     #robot_gripper.Grasp(request.force_limit)
+        #     robot_gripper.Move(0, 0.1, 50)
             
-            return {
-                "message": f"{robot_side.capitalize()} gripper grasp with force limit {request.force_limit}"}
+        #     return {
+        #         "message": f"{robot_side.capitalize()} gripper grasp with force limit {request.force_limit}"}
+        @self.app.post('/move_gripper_force/{robot_side}')
+        async def move_gripper_force(robot_side: str, request: MoveGripperRequest):
+            if robot_side != 'left':
+                raise HTTPException(status_code=400, detail="Only left is available in your setup.")
+
+            width = float(request.width)
+            vel = float(request.velocity)
+            force = float(request.force_limit)
+
+            logger.info(f"[GRIPPER_FORCE RX] side=left width={width:.4f} vel={vel:.3f} force_limit={force:.1f}")
+
+            try:
+                # 这里先仍然用 Move（你所谓“force control”其实还是 force_limit 参数）
+                self.left_robot.move_gripper_safe(width, vel, force)
+                return {"message": "ok"}
+            except Exception as e:
+                logger.exception(f"[GRIPPER_FORCE MOVE ERROR] err={repr(e)}")
+                raise HTTPException(status_code=500, detail=str(e))
+
 
         @self.app.post('/stop_gripper/{robot_side}')
         async def stop_gripper(robot_side: str) -> Dict[str, str]:

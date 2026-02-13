@@ -29,8 +29,11 @@ try:
 
 
     # position = [0.5300 ,-0.0269 , 0.30] 插插头擦白板的初始位置
-    position = [0.5800 ,-0.0269 , 0.25] #插usb的初始位置
-    euler_degrees = [-179.1952  ,  0.2877   ,-178.6688]
+    # position = [0.5800 ,-0.0269 , 0.25] #插usb的初始位置
+    # euler_degrees = [-179.1952  ,  0.2877   ,-178.6688]
+    
+    position = [0.6066, -0.123 ,  0.2639] #拉抽屉的初始position
+    euler_degrees = [-179.3194 ,   7.8216,  -90.595] #拉抽屉的初始euler
 
     robot.Move_gripper(0.1, speed=0.1, force=10.0)
     robot.MoveL(position,euler_degrees, speed=0.1, acc=0.1)

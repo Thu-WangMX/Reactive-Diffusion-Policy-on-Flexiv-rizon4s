@@ -397,6 +397,22 @@ class RealRunner:
             self._dbg("warn", key=str(key), msg=str(msg), ctr=int(c))
         except Exception:
             pass
+    
+    @staticmethod
+    def spin_executor(executor, stop_event=None):
+        """
+        Spin ROS2 executor in a background thread.
+        """
+        try:
+            executor.spin()
+        except Exception as e:
+            logger.exception(f"[SPIN] executor.spin() crashed: {repr(e)}")
+            if stop_event is not None:
+                try:
+                    stop_event.set()
+                except Exception:
+                    pass
+
 
 
 
@@ -416,9 +432,8 @@ class RealRunner:
         logger.info(f"[PAEP] logging to: {log_path}")
         return log
 
-    @staticmethod
-    def spin_executor(executor):
-        executor.spin()
+
+
 
     def pre_process_obs(self, obs_dict: Dict) -> Tuple[Dict, Dict]:
         obs_dict = deepcopy(obs_dict)
@@ -697,8 +712,8 @@ class RealRunner:
                     sm = step_action.copy()
 
                     # 平滑 left/right 的 tcp 6d（0:6 和 8:14），不动 gripper 宽度等剩余维度
-                    sm[0:6]   = (1 - a) * self._last_step_action[0:6]   + a * step_action[0:6]
-                    sm[8:14]  = (1 - a) * self._last_step_action[8:14]  + a * step_action[8:14]
+                    sm[0:2]   = (1 - a) * self._last_step_action[0:2]   + a * step_action[0:2]
+                    #sm[8:14]  = (1 - a) * self._last_step_action[8:14]  + a * step_action[8:14]
 
                     step_action = sm
                     self._last_step_action = step_action.copy()
@@ -823,11 +838,31 @@ class RealRunner:
 
 
                     if pc is not None and p_phase is not None:
+                        pc_new = float(pc)
+                        pp_new = np.asarray(p_phase, dtype=np.float32).reshape(-1)
+
+                        # ---- EMA smoothing to reduce phase/contact jitter ----
+                        ema = 0.2  # 越小越稳(0.1更稳)，越大越跟得快(0.3更灵敏)
                         with self._paep_cache_lock:
-                            self._fast_paep_p_contact = float(pc)
-                            self._fast_paep_p_phase = np.asarray(p_phase, dtype=np.float32).reshape(-1)
+                            if (self._fast_paep_p_contact is None) or (self._fast_paep_p_phase is None):
+                                pc_s = pc_new
+                                pp_s = pp_new
+                            else:
+                                pc_s = (1 - ema) * float(self._fast_paep_p_contact) + ema * pc_new
+                                pp_old = np.asarray(self._fast_paep_p_phase, dtype=np.float32).reshape(-1)
+                                # 防止维度不一致
+                                if pp_old.shape == pp_new.shape:
+                                    pp_s = (1 - ema) * pp_old + ema * pp_new
+                                else:
+                                    pp_s = pp_new
+
+                            self._fast_paep_p_contact = float(pc_s)
+                            self._fast_paep_p_phase = np.asarray(pp_s, dtype=np.float32).reshape(-1)
+
+                        # phase_id 用平滑后的 pp_s 再 argmax（比直接用瞬时 phase_id 稳很多）
                         with self._phase_lock:
-                            self._latest_phase_id = phase_id
+                            self._latest_phase_id = int(np.argmax(pp_s)) if pp_s.size > 0 else phase_id
+
 
 
             except Exception as e:
@@ -1015,34 +1050,50 @@ class RealRunner:
         self._fz_dense_step.append(np.int32(control_step))
 
         # --- PAEP snapshot (compact) ---
+        rec = {
+            "control_step": int(control_step),
+            "phase_id": None,
+            "p_contact": None,
+        }
+
         try:
+            # 1) 读缓存（fast_paep_*）——这俩是连续概率
             with self._paep_cache_lock:
                 pc = self._fast_paep_p_contact
                 pp = self._fast_paep_p_phase
 
+            # 2) 读 argmax 的 phase_id（硬标签，仅作参考）
             with self._phase_lock:
                 phase_id = self._latest_phase_id
 
-            rec = {
-                "control_step": int(control_step),
-                "phase_id": None if phase_id is None else int(phase_id),
-                "p_contact": None if pc is None else float(pc),
-            }
+            rec["phase_id"] = None if phase_id is None else int(phase_id)
+            rec["p_contact"] = None if pc is None else float(pc)
 
+            # 3) 连续 phase 概率：存 full 向量（float16 压缩）
             if pp is not None:
                 pp = np.asarray(pp, dtype=np.float32).reshape(-1)
+
+                # ✅ store full continuous probs (compact)
+                rec["p_phase_full_f16"] = pp.astype(np.float16)
+
                 if pp.size > 0:
                     k = 2 if pp.size >= 2 else 1
                     idx = np.argpartition(pp, -k)[-k:]
                     idx = idx[np.argsort(pp[idx])[::-1]]
+
                     rec["p_phase_top_idx"] = [int(i) for i in idx.tolist()]
                     rec["p_phase_top_val"] = [float(pp[i]) for i in idx.tolist()]
+
                     p = np.clip(pp, 1e-8, 1.0)
                     rec["p_phase_entropy"] = float(-(p * np.log(p)).sum())
 
-            self._dbg("paep_ctrl", **rec)
-        except Exception:
-            pass
+        except Exception as e:
+            # 不要静默吞：至少留一个轻量提示（不会太频繁）
+            self._dbg("warn", key="paep_ctrl_pack", control_step=int(control_step), msg=repr(e))
+
+        # ✅ 无论 pp 是否存在，都要写入 paep_ctrl（否则 plot 会空）
+        self._dbg("paep_ctrl", **rec)
+
 
 
 
@@ -1060,8 +1111,14 @@ class RealRunner:
         executor.add_node(self.env)
 
         try:
-            spin_thread = threading.Thread(target=self.spin_executor, args=(executor,), daemon=True)
+            spin_thread = threading.Thread(
+                target=self.spin_executor,
+                args=(executor, self.stop_event),
+                daemon=True
+            )
             spin_thread.start()
+            self._spin_thread = spin_thread
+
 
             if self._fz_run_ts is None:
                 self._fz_run_ts = _now_timestamp()
@@ -1155,6 +1212,9 @@ class RealRunner:
                 infer_step = 0
 
                 try:
+                    if hasattr(self, "_spin_thread") and (self._spin_thread is not None) and (not self._spin_thread.is_alive()):
+                        raise RuntimeError("[SPIN] spin thread is dead -> no ROS callbacks -> get_obs will stall.")
+
                     while True:
                         if not action_thread.is_alive():
                             raise RuntimeError("action_command_thread died. Check logs above for the real exception.")

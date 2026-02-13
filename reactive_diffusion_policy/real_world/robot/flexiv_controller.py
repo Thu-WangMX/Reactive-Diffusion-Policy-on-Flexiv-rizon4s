@@ -12,6 +12,7 @@ import time
 from typing import List
 from loguru import logger
 from scipy.spatial.transform import Rotation as R
+import threading
 
 class FlexivController:
     def __init__(self, 
@@ -87,6 +88,8 @@ class FlexivController:
                     #         "has no fault, 2) is in [Auto (remote)] mode")
          
                 self.gripper = flexivrdk.Gripper(self.robot) 
+                self._gripper_lock = threading.Lock()
+
                 print(99999999)
             
                 self.tool = flexivrdk.Tool(self.robot)
@@ -94,8 +97,8 @@ class FlexivController:
                 self.gripper.Enable(gripper_name)
                 
                 
-                self.gripper.Move(0,0.1,80)#新增：初始时闭合夹爪
-                print("夹爪闭合")
+                # self.gripper.Move(0,0.1,80)#新增：初始时闭合夹爪
+                # print("夹爪闭合")
        
                 
                 #初始化，在开机时可以先在示教器上手动初始化
@@ -240,7 +243,7 @@ class FlexivController:
         self.robot.SendCartesianMotionForce(
             target_tcp,
             [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-            0.05
+            0.1
         )
         print("机械臂执行一次tcp_move")
 
@@ -429,6 +432,58 @@ class FlexivController:
             - 用于执行基本运动指令
         """
         self.robot.SwitchMode(self.mode.NRT_PRIMITIVE_EXECUTION)
+    
+    def move_gripper_safe(self, width: float, speed: float = 0.1, force: float = 10.0,
+                        width_min: float = 0.0, width_max: float = 0.10,
+                        speed_min: float = 0.001, speed_max: float = 0.20,
+                        force_min: float = 0.0, force_max: float = 80.0):
+        """
+        线程安全 + 参数裁剪的夹爪控制接口
+        - 解决 FastAPI 并发请求导致的 gripper 非线程安全问题
+        - 统一 server 侧调用接口：bimanual_flexiv_server 会调用这个名字
+        """
+        if not hasattr(self, "gripper"):
+            raise RuntimeError("Gripper not initialized: self.gripper not found")
+
+        # ---- sanitize / clamp ----
+        w = float(width)
+        v = float(speed)
+        f = float(force)
+
+        if w < width_min: w = width_min
+        if w > width_max: w = width_max
+
+        if v < speed_min: v = speed_min
+        if v > speed_max: v = speed_max
+
+        # force_limit 一般用 [0, 80] 更合理；负值在很多实现里语义不清
+        if f < force_min: f = force_min
+        if f > force_max: f = force_max
+
+        # ---- serialize gripper calls ----
+        lock = getattr(self, "_gripper_lock", None)
+        if lock is None:
+            # 兼容老代码：即便你忘加 lock，也不至于直接崩
+            self._gripper_lock = threading.Lock()
+            lock = self._gripper_lock
+
+        with lock:
+            self.gripper.Move(w, v, f)
+            return {"ok": True, "width": w, "velocity": v, "force_limit": f}
+
+    def gripper_states_safe(self):
+        # 兼容老接口：即使底层偶发读失败，也别让上层接口直接炸
+        try:
+            return self.gripper_states()
+        except Exception as e:
+            # 这里按你项目的 logger 来（loguru / logging）
+            try:
+                from loguru import logger
+                logger.warning(f"[GRIPPER] gripper_states failed: {e}")
+            except Exception:
+                pass
+            return None
+
     def Move_gripper(self, width, speed=0.1, force=10.0):
         """
         控制夹爪运动
