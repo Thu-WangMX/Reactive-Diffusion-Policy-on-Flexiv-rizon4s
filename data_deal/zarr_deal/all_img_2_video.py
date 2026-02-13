@@ -6,7 +6,7 @@ from tqdm import tqdm
 
 # ================= 配置区域 =================
 # Zarr 文件路径
-ZARR_PATH = '/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/dataset/plug_in_charger/plug_in_charger_stream_downsample1_zarr/replay_buffer.zarr'
+ZARR_PATH = '/home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/dataset/open_drawer/open_drawer_stream_downsample1_zarr/replay_buffer.zarr'
 # 输出视频的保存目录
 OUTPUT_DIR = os.path.join(os.path.dirname(ZARR_PATH), 'videos')
 
@@ -19,8 +19,8 @@ DRAW_TEXT = True
 # 【新增】Episode 范围选择
 # 设置为 None 表示不限制 (即从头开始 或 直到最后)
 # 例如: (12, 15) 表示可视化第 12, 13, 14 集
-VISUALIZE_START_IDX = 12      # 从第几个 Episode 开始 (包含)
-VISUALIZE_END_IDX = 13        # 到第几个 Episode 结束 (不包含)，None 表示画到最后
+VISUALIZE_START_IDX = 32      # 从第几个 Episode 开始 (包含)
+VISUALIZE_END_IDX = 36        # 到第几个 Episode 结束 (不包含)，None 表示画到最后
 # ===========================================
 
 def main():
@@ -104,6 +104,9 @@ def main():
             frame_ext = cv2.cvtColor(img_external[i], cv2.COLOR_RGB2BGR)
             frame_left = cv2.cvtColor(img_left[i], cv2.COLOR_RGB2BGR)
             frame_right = cv2.cvtColor(img_right[i], cv2.COLOR_RGB2BGR)
+            frame_ext = img_external[i]
+            frame_left = img_left[i]
+            frame_right = img_right[i]
             
             # 水平拼接
             combined_frame = np.hstack([frame_ext, frame_left, frame_right])
