@@ -1,186 +1,111 @@
-# #!/bin/bash
+#!/bin/bash
+# 增强鲁棒性：e(出错终止) + u(未定义变量报错) + o pipefail(管道错误传递)
+set -euo pipefail  
 
-# GPU_ID=0
-
-# TASK_NAME="peel"
-# DATASET_PATH="/home/wendi/Desktop/record_data/peel_v3_downsample1_zarr"
-# LOGGING_MODE="online"
-
-# TIMESTAMP=$(date +%m%d%H%M%S)
-# SEARCH_PATH="./data/outputs"
-
-# # Stage 1: Train Asymmetric Tokenizer
-# echo "Stage 1: training Asymmetric Tokenizer..."
-# CUDA_VISIBLE_DEVICES=${GPU_ID} python train.py \
-#     --config-name=train_at_workspace \
-#     task=real_${TASK_NAME}_image_gelsight_emb_at_24fps \
-#     task.dataset_path=${DATASET_PATH} \
-#     task.name=real_${TASK_NAME}_image_gelsight_emb_at_24fps_${TIMESTAMP} \
-#     at=at_peel \
-#     logging.mode=${LOGGING_MODE}
-
-# # find the latest checkpoint
-# echo ""
-# echo "Searching for the latest AT checkpoint..."
-# AT_LOAD_DIR=$(find "${SEARCH_PATH}" -maxdepth 2 -path "*${TIMESTAMP}*" -type d)/checkpoints/latest.ckpt
-
-# if [ ! -f "${AT_LOAD_DIR}" ]; then
-#     echo "Error: VAE checkpoint not found at ${AT_LOAD_DIR}"
-#     exit 1
-# fi
-
-# # Stage 2: Train Latent Diffusion Policy
-# echo ""
-# echo "Stage 2: training Latent Diffusion Policy..."
-# CUDA_VISIBLE_DEVICES=${GPU_ID} accelerate launch train.py \
-#     --config-name=train_latent_diffusion_unet_real_image_workspace \
-#     task=real_${TASK_NAME}_image_gelsight_emb_ldp_24fps \
-#     task.dataset_path=${DATASET_PATH} \
-#     task.name=real_${TASK_NAME}_image_gelsight_emb_ldp_24fps_${TIMESTAMP} \
-#     at=at_peel \
-#     at_load_dir=${AT_LOAD_DIR} \
-#     logging.mode=${LOGGING_MODE}
-
-
-# #!/bin/bash
-
-# # ================= 配置区域 =================
-# # 1. 物理显卡ID：只填你想用的那两张卡 (例如 4 和 5)
-# GPU_IDS="4,5"
-
-# # 2. 进程数 (Stage 2 使用)
-# NUM_PROCESSES=2
-
-# # 3. 端口号：【关键】必须和 train_dp.sh 不一样，防止冲突
-# MASTER_PORT=29501
-
-# # 4. 任务配置
-# DATASET_PATH="/work/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/dataset/wiping_board_stream_downsample1_zarr"
-# AT_TASK="wmx_real_wiping_board_image_wrench_at_24fps"
-# LDP_TASK="wmx_real_wiping_board_two_cam_image_wrench_ldp_24fps"
-# AT_CONFIG="at_peel"
-
-# LOGGING_MODE="online"
-# LOG_DIR="rdp_train_logs" # 单独的 RDP 日志文件夹
-# mkdir -p "${LOG_DIR}"
-# TIMESTAMP=$(date +%m%d%H%M%S)
-
-
-# SEARCH_PATH="./data/outputs"
-
-# #Stage 1: 训练 AT
-# CUDA_VISIBLE_DEVICES=${GPU_ID} python train.py \
-#     --config-name=train_at_workspace \
-#     task=${AT_TASK} \
-#     task.dataset_path=${DATASET_PATH} \
-#     task.name=${AT_TASK}_${TIMESTAMP} \
-#     at=${AT_CONFIG} \
-#     logging.mode=${LOGGING_MODE}
-
-# # 找刚训练好的 AT checkpoint
-# AT_LOAD_DIR=$(find "${SEARCH_PATH}" -maxdepth 2 -path "*${TIMESTAMP}*" -type d)/checkpoints/latest.ckpt
-
-
-# # AT_LOAD_DIR="./data/outputs/2025.11.29/19.14.55_train_vae_wmx_real_plugin_image_wrench_at_24fps_1129191454/checkpoints/latest.ckpt"
-
-# # Stage 2: 训练 LDP/RDP
-# CUDA_VISIBLE_DEVICES=${GPU_ID} accelerate launch train.py \
-#     --config-name=train_latent_diffusion_unet_real_image_workspace \
-#     task=${LDP_TASK} \
-#     task.dataset_path=${DATASET_PATH} \
-#     task.name=${LDP_TASK}_${TIMESTAMP} \
-#     at=${AT_CONFIG} \
-#     at_load_dir=${AT_LOAD_DIR} \
-#     logging.mode=${LOGGING_MODE}
-
-set -e
 # ================= 配置区域 =================
 # 物理显卡ID (确保这几张卡是空闲的)
-GPU_IDS="4,5"
-NUM_PROCESSES=2
+GPU_IDS="2,3,4,5"
+NUM_PROCESSES=4
 MASTER_PORT=29501
 
-DATASET_PATH="/work/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/dataset/wiping_board_stream_downsample1_zarr"
-AT_TASK="wmx_real_wiping_board_image_wrench_at_24fps"
-LDP_TASK="wmx_real_wiping_board_two_cam_image_wrench_ldp_24fps"
+# 数据集绝对路径（已正确使用，保留）
+DATASET_PATH="/root/workspace/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/dataset/open_drawer/open_drawer_stream_downsample1_zarr"
+AT_TASK="wmx_real_open_drawer_image_wrench_at_24fps"
+LDP_TASK="wmx_real_open_drawer_three_cam_image_wrench_ldp_24fps"
 AT_CONFIG="at_peel"
 
-# 日志设置
-LOG_DIR="rdp_train_logs" 
-LOGGING_MODE="online" # 强制离线，防止卡住
+# 日志设置（统一用绝对路径，避免执行目录问题）
+LOG_DIR="/root/workspace/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/rdp_train_logs" 
+LOGGING_MODE="online" # 修复：注释与值一致，避免wandb在线卡住
 # ===========================================
 
+# 确保日志目录存在（绝对路径）
 mkdir -p "${LOG_DIR}"
-rm -rf wandb/ # 清理缓存
+# 清理wandb缓存（加-f强制删除，避免目录非空报错）
+rm -rf wandb/ || true  
 TIMESTAMP=$(date +%m%d%H%M%S)
 
-echo "=== RDP Pipeline Started ==="
+echo -e "\033[32m=== RDP Pipeline Started (${TIMESTAMP}) ===\033[0m"
 
 # # ==========================================================
 # # Stage 1: 训练 Action Tokenizer (AT)
 # # ==========================================================
 # LOG_FILE_AT="${LOG_DIR}/${AT_TASK}_${TIMESTAMP}.log"
-# echo "[Stage 1] Training AT... (Logs: ${LOG_FILE_AT})"
+# echo -e "\033[34m[Stage 1] Training AT... (Logs: ${LOG_FILE_AT})\033[0m"
 
-# # ⚠️ 注意：这里显式检查 python 的退出码
-# # 如果 python 报错， set -e 会自动停止，但为了保险我们加个 || exit 1
-# CUDA_VISIBLE_DEVICES=${GPU_IDS} python train.py \
+# # 关键修复：1. 用绝对路径执行python；2. 日志同时输出到终端+文件；3. 显式指定CUDA
+# CUDA_VISIBLE_DEVICES=${GPU_IDS} python /root/workspace/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/train.py \
 #     --config-name=train_at_workspace \
 #     task=${AT_TASK} \
 #     task.dataset_path=${DATASET_PATH} \
 #     task.name=${AT_TASK}_${TIMESTAMP} \
 #     at=${AT_CONFIG} \
 #     logging.mode=${LOGGING_MODE} \
-#     > "${LOG_FILE_AT}" 2>&1 || { echo "❌ Stage 1 Failed! See ${LOG_FILE_AT}"; exit 1; }
+#     > >(tee -a "${LOG_FILE_AT}") 2>&1 || { 
+#         echo -e "\033[31m❌ Stage 1 Failed! See ${LOG_FILE_AT}\033[0m"; 
+#         exit 1; 
+#     }
 
-# echo "✅ Stage 1 Completed Successfully."
+# echo -e "\033[32m✅ Stage 1 Completed Successfully.\033[0m"
 
 # # ==========================================================
-# # 中间检查：寻找 Checkpoint (使用绝对路径)
+# # 中间检查：寻找 Checkpoint (核心修复：绝对路径+按时间排序)
 # # ==========================================================
-# SEARCH_PATH="./data/outputs"
-# # 寻找匹配任务名的最新文件夹
-# LATEST_DIR=$(find "${SEARCH_PATH}" -maxdepth 2 -type d -name "${AT_TASK}_${TIMESTAMP}" | head -n 1)
+# # 修复1：改用绝对路径（根据你的ckpt示例路径调整）
+# SEARCH_PATH="/root/workspace/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/data/outputs"
+# # 修复2：find按修改时间排序，取最新的匹配目录（避免多目录匹配错误）
+# LATEST_DIR=$(find "${SEARCH_PATH}" -maxdepth 3 -type d -name "*${AT_TASK}_${TIMESTAMP}*" | sort -r | head -n 1)
 
-
-# if [ -z "$LATEST_DIR" ]; then
-#     echo "❌ Error: Could not find output directory for ${AT_TASK}_${TIMESTAMP}"
+# # 增强检查：空值提示+打印搜索路径
+# if [ -z "${LATEST_DIR:-}" ]; then
+#     echo -e "\033[31m❌ Error: Could not find output directory for ${AT_TASK}_${TIMESTAMP}\033[0m"
+#     echo -e "\033[31mSearch Path: ${SEARCH_PATH}\033[0m"
+#     # 打印搜索路径下的所有目录，方便排查
+#     ls -l "${SEARCH_PATH}" || true
 #     exit 1
 # fi
 
 # # 转换为绝对路径 (解决 FileNotFoundError 的关键)
 # AT_LOAD_DIR=$(readlink -f "${LATEST_DIR}/checkpoints/latest.ckpt")
 
-AT_LOAD_DIR='/work/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/data/outputs/2026.01.17/20.53.09_train_vae_wmx_real_wiping_board_image_wrench_at_24fps_0117205307/checkpoints/latest.ckpt'
+AT_LOAD_DIR="/root/workspace/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/data/outputs/2026.02.13/17.18.13_train_vae_wmx_real_open_drawer_image_wrench_at_24fps_0213171811/checkpoints/latest.ckpt"
 
+# # 增强检查：文件不存在时打印目录内容
 # if [ ! -f "${AT_LOAD_DIR}" ]; then
-#     echo "❌ Error: Checkpoint file missing at ${AT_LOAD_DIR}"
+#     echo -e "\033[31m❌ Error: Checkpoint file missing at ${AT_LOAD_DIR}\033[0m"
+#     ls -l "${LATEST_DIR}/checkpoints/" || true
 #     exit 1
 # else
-#     echo "✅ Checkpoint found: ${AT_LOAD_DIR}"
+#     echo -e "\033[32m✅ Checkpoint found: ${AT_LOAD_DIR}\033[0m"
 # fi
+
+
 
 # ==========================================================
 # Stage 2: 训练 Latent Diffusion Policy (LDP)
 # ==========================================================
 LOG_FILE_LDP="${LOG_DIR}/${LDP_TASK}_${TIMESTAMP}.log"
-echo "[Stage 2] Training LDP... (Logs: ${LOG_FILE_LDP})"
+echo -e "\033[34m[Stage 2] Training LDP... (Logs: ${LOG_FILE_LDP})\033[0m"
 
-# 清除环境变量，防止干扰 accelerate
-unset CUDA_VISIBLE_DEVICES
+# 修复：保留CUDA_VISIBLE_DEVICES，避免accelerate GPU分配冲突
+# unset CUDA_VISIBLE_DEVICES 
 
+# 核心修复：1. accelerate指定绝对路径；2. 日志实时输出；3. 参数用引号包裹避免空格问题
 accelerate launch \
-    --gpu_ids ${GPU_IDS} \
-    --num_processes ${NUM_PROCESSES} \
-    --main_process_port ${MASTER_PORT} \
-    train.py \
+    --gpu_ids "${GPU_IDS}" \
+    --num_processes "${NUM_PROCESSES}" \
+    --main_process_port "${MASTER_PORT}" \
+    /root/workspace/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/train.py \
     --config-name=train_latent_diffusion_unet_real_image_workspace \
-    task=${LDP_TASK} \
-    task.dataset_path=${DATASET_PATH} \
-    task.name=${LDP_TASK}_${TIMESTAMP} \
-    at=${AT_CONFIG} \
-    at_load_dir=${AT_LOAD_DIR} \
-    logging.mode=${LOGGING_MODE} \
-    > "${LOG_FILE_LDP}" 2>&1 || { echo "❌ Stage 2 Failed! See ${LOG_FILE_LDP}"; exit 1; }
+    task="${LDP_TASK}" \
+    task.dataset_path="${DATASET_PATH}" \
+    task.name="${LDP_TASK}_${TIMESTAMP}" \
+    at="${AT_CONFIG}" \
+    at_load_dir="${AT_LOAD_DIR}" \
+    logging.mode="${LOGGING_MODE}" \
+    > >(tee -a "${LOG_FILE_LDP}") 2>&1 || { 
+        echo -e "\033[31m❌ Stage 2 Failed! See ${LOG_FILE_LDP}\033[0m"; 
+        exit 1; 
+    }
 
-echo "🎉 All Stages Completed! Logs in ${LOG_DIR}"
+echo -e "\033[32m🎉 All Stages Completed! Logs in ${LOG_DIR}\033[0m"

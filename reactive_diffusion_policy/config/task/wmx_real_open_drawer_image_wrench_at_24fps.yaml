@@ -5,7 +5,7 @@ defaults:
 name: wmx_real_open_drawer_image_wrench_at_24fps
 
 image_shape: [3, 240, 320]
-dataset_path: /home/wmx/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/dataset/plug_in_usb/plug_in_usb_rdp_stream_downsample1_zarr
+dataset_path: /root/workspace/Reactive-Diffusion-Policy-on-Flexiv-rizon4s/dataset/open_drawer/open_drawer_stream_downsample1_zarr
 
 shape_meta: &shape_meta
   # acceptable types: rgb, low_dim
